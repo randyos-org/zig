@@ -87,7 +87,7 @@ pub fn free(sdk: WindowsSdk, gpa: Allocator) void {
 /// Iterates via `iterator` and collects all folders with names starting with `strip_prefix`
 /// and a version. Returns slice of version strings sorted in descending order.
 /// Caller owns result.
-fn iterateAndFilterByVersion(
+pub fn iterateAndFilterByVersion(
     iterator: *Dir.Iterator,
     gpa: Allocator,
     io: Io,

@@ -367,6 +367,20 @@ fn findNativeIncludeDirPosix(self: *LibCInstallation, gpa: Allocator, io: Io, ar
     return error.LibCStdLibHeaderNotFound;
 }
 
+/// Newer Windows SDK releases may omit arm libs that older installed versions
+/// still provide, so per-arch lookups need to check older installed versions
+/// rather than only trying the newest.
+fn findSdkLibVersions(gpa: Allocator, io: Io, install_path: []const u8) error{OutOfMemory}![][]const u8 {
+    var path_buf: [Io.Dir.max_path_bytes]u8 = undefined;
+    const lib_path = std.fmt.bufPrint(&path_buf, "{s}\\Lib\\", .{install_path}) catch return &.{};
+
+    var lib_dir = Io.Dir.cwd().openDir(io, lib_path, .{ .iterate = true }) catch return &.{};
+    defer lib_dir.close(io);
+
+    var iterator = lib_dir.iterate();
+    return std.zig.WindowsSdk.iterateAndFilterByVersion(&iterator, gpa, io, "");
+}
+
 fn findNativeIncludeDirWindows(
     self: *LibCInstallation,
     gpa: Allocator,
@@ -427,26 +441,34 @@ fn findNativeCrtDirWindows(
     };
 
     for (installs) |install| {
-        result_buf.shrinkAndFree(0);
-        try result_buf.print("{s}\\Lib\\{s}\\ucrt\\{s}", .{ install.path, install.version, arch_sub_dir });
+        const versions = try findSdkLibVersions(gpa, io, install.path);
+        defer {
+            for (versions) |version| gpa.free(version);
+            gpa.free(versions);
+        }
 
-        var dir = Io.Dir.cwd().openDir(io, result_buf.items, .{}) catch |err| switch (err) {
-            error.FileNotFound,
-            error.NotDir,
-            error.NoDevice,
-            => continue,
+        for (versions) |ver| {
+            result_buf.shrinkAndFree(0);
+            try result_buf.print("{s}\\Lib\\{s}\\ucrt\\{s}", .{ install.path, ver, arch_sub_dir });
 
-            else => return error.FileSystem,
-        };
-        defer dir.close(io);
+            var dir = Io.Dir.cwd().openDir(io, result_buf.items, .{}) catch |err| switch (err) {
+                error.FileNotFound,
+                error.NotDir,
+                error.NoDevice,
+                => continue,
 
-        dir.access(io, "ucrt.lib", .{}) catch |err| switch (err) {
-            error.FileNotFound => continue,
-            else => return error.FileSystem,
-        };
+                else => return error.FileSystem,
+            };
+            defer dir.close(io);
 
-        self.crt_dir = try result_buf.toOwnedSlice();
-        return;
+            dir.access(io, "ucrt.lib", .{}) catch |err| switch (err) {
+                error.FileNotFound => continue,
+                else => return error.FileSystem,
+            };
+
+            self.crt_dir = try result_buf.toOwnedSlice();
+            return;
+        }
     }
     return error.LibCRuntimeNotFound;
 }
@@ -494,26 +516,34 @@ fn findNativeKernel32LibDir(
     };
 
     for (installs) |install| {
-        result_buf.shrinkAndFree(0);
-        try result_buf.print("{s}\\Lib\\{s}\\um\\{s}", .{ install.path, install.version, arch_sub_dir });
+        const versions = try findSdkLibVersions(gpa, io, install.path);
+        defer {
+            for (versions) |version| gpa.free(version);
+            gpa.free(versions);
+        }
 
-        var dir = Io.Dir.cwd().openDir(io, result_buf.items, .{}) catch |err| switch (err) {
-            error.FileNotFound,
-            error.NotDir,
-            error.NoDevice,
-            => continue,
+        for (versions) |ver| {
+            result_buf.shrinkAndFree(0);
+            try result_buf.print("{s}\\Lib\\{s}\\um\\{s}", .{ install.path, ver, arch_sub_dir });
 
-            else => return error.FileSystem,
-        };
-        defer dir.close(io);
+            var dir = Io.Dir.cwd().openDir(io, result_buf.items, .{}) catch |err| switch (err) {
+                error.FileNotFound,
+                error.NotDir,
+                error.NoDevice,
+                => continue,
 
-        dir.access(io, "kernel32.lib", .{}) catch |err| switch (err) {
-            error.FileNotFound => continue,
-            else => return error.FileSystem,
-        };
+                else => return error.FileSystem,
+            };
+            defer dir.close(io);
 
-        self.kernel32_lib_dir = try result_buf.toOwnedSlice();
-        return;
+            dir.access(io, "kernel32.lib", .{}) catch |err| switch (err) {
+                error.FileNotFound => continue,
+                else => return error.FileSystem,
+            };
+
+            self.kernel32_lib_dir = try result_buf.toOwnedSlice();
+            return;
+        }
     }
     return error.LibCKernel32LibNotFound;
 }

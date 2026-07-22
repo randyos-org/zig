@@ -12,7 +12,7 @@ const Allocator = std.mem.Allocator;
 
 handle: Handle,
 
-pub const Handle = std.posix.fd_t;
+pub const Handle = std.c.fd_t;
 
 pub const path = std.fs.path;
 
