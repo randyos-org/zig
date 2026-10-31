@@ -366,7 +366,7 @@ fn loadComptimePtrInner(
     };
 
     if (ptr.byte_offset == 0) {
-        if (load_ty.zigTypeTag(zcu) != .array or array_offset == 0) {
+        if (!isArrayLike(load_ty, zcu) or array_offset == 0) {
             if (.ok == try sema.coerceInMemoryAllowed(
                 block,
                 load_ty,
@@ -416,7 +416,7 @@ fn loadComptimePtrInner(
             null,
         )) {
             // Changing the length of an array.
-            const skip_base: u64 = extra_base_index + if (load_ty.zigTypeTag(zcu) == .array) skip: {
+            const skip_base: u64 = extra_base_index + if (isArrayLike(load_ty, zcu)) skip: {
                 break :skip load_ty.childType(zcu).arrayBase(zcu)[1] * array_offset;
             } else 0;
             if (skip_base + load_count > val_count) return .{ .out_of_bounds = base_val.typeOf(zcu) };
@@ -444,7 +444,7 @@ fn loadComptimePtrInner(
     var cur_val = base_val;
     var cur_offset = ptr.byte_offset;
 
-    if (load_ty.zigTypeTag(zcu) == .array and array_offset > 0) {
+    if (isArrayLike(load_ty, zcu) and array_offset > 0) {
         cur_offset += load_ty.childType(zcu).abiSize(zcu) * array_offset;
     }
 
@@ -482,10 +482,9 @@ fn loadComptimePtrInner(
             .frame,
             .@"enum",
             .vector,
-            .matrix,
             => break, // terminal types (no sub-values)
             .optional => break, // this can only be a pointer-like optional so is terminal
-            .array => {
+            .array, .matrix => {
                 const elem_ty = cur_ty.childType(zcu);
                 const elem_size = elem_ty.abiSize(zcu);
                 const elem_idx = cur_offset / elem_size;
@@ -765,7 +764,7 @@ fn prepareComptimePtrStore(
     };
 
     if (ptr.byte_offset == 0) {
-        if (store_ty.zigTypeTag(zcu) != .array or array_offset == 0) direct: {
+        if (!isArrayLike(store_ty, zcu) or array_offset == 0) direct: {
             const base_val_ty = switch (base_strat) {
                 .direct => |direct| direct.val.typeOf(zcu),
                 .index => |index| index.val.typeOf(zcu).childType(zcu),
@@ -818,7 +817,7 @@ fn prepareComptimePtrStore(
         }
         if (base_elem_offset + extra_base_index + store_count > val_count) return .{ .out_of_bounds = oob_ty };
 
-        if (store_ty.zigTypeTag(zcu) == .array) {
+        if (isArrayLike(store_ty, zcu)) {
             const skip = store_ty.childType(zcu).arrayBase(zcu)[1] * array_offset;
             return .{ .flat_index = .{
                 .alloc = base_strat.alloc(),
@@ -828,7 +827,7 @@ fn prepareComptimePtrStore(
         }
 
         // `base_val` must be an array, since otherwise the "direct reinterpret" logic above noticed it.
-        assert(base_val.typeOf(zcu).zigTypeTag(zcu) == .array);
+        assert(isArrayLike(base_val.typeOf(zcu), zcu));
 
         var index: u64 = base_elem_offset + extra_base_index;
         const arr_val, const arr_index = (try recursiveIndex(sema, base_val, &index)).?;
@@ -864,7 +863,7 @@ fn prepareComptimePtrStore(
         return .{ .needed_well_defined = cur_val.typeOf(zcu) };
     }
 
-    if (store_ty.zigTypeTag(zcu) == .array and array_offset > 0) {
+    if (isArrayLike(store_ty, zcu) and array_offset > 0) {
         cur_offset += store_ty.childType(zcu).abiSize(zcu) * array_offset;
     }
 
@@ -902,10 +901,9 @@ fn prepareComptimePtrStore(
             .frame,
             .@"enum",
             .vector,
-            .matrix,
             => break, // terminal types (no sub-values)
             .optional => break, // this can only be a pointer-like optional so is terminal
-            .array => {
+            .array, .matrix => {
                 const elem_ty = cur_ty.childType(zcu);
                 const elem_size = elem_ty.abiSize(zcu);
                 const elem_idx = cur_offset / elem_size;
@@ -992,7 +990,7 @@ fn flattenArray(
         return;
     }
 
-    if (ty.zigTypeTag(zcu) != .array) {
+    if (!isArrayLike(ty, zcu)) {
         out[@intCast(next_idx.*)] = (try val.intern(sema.pt, sema.arena)).toIntern();
         next_idx.* += 1;
         return;
@@ -1026,7 +1024,7 @@ fn unflattenArray(
     const zcu = pt.zcu;
     const arena = sema.arena;
 
-    if (ty.zigTypeTag(zcu) != .array) {
+    if (!isArrayLike(ty, zcu)) {
         const val = Value.fromInterned(elems[@intCast(next_idx.*)]);
         next_idx.* += 1;
         return pt.getCoerced(val, ty);
@@ -1055,7 +1053,7 @@ fn recursiveIndex(
     const pt = sema.pt;
 
     const ty = mv.typeOf(pt.zcu);
-    assert(ty.zigTypeTag(pt.zcu) == .array);
+    assert(isArrayLike(ty, pt.zcu));
 
     const ty_base_elems = ty.arrayBase(pt.zcu)[1];
     if (index.* >= ty_base_elems) {
@@ -1064,7 +1062,7 @@ fn recursiveIndex(
     }
 
     const elem_ty = ty.childType(pt.zcu);
-    if (elem_ty.zigTypeTag(pt.zcu) != .array) {
+    if (!isArrayLike(elem_ty, pt.zcu)) {
         assert(index.* < ty.arrayLenIncludingSentinel(pt.zcu)); // should be handled by initial check
         return .{ mv, index.* };
     }
@@ -1105,6 +1103,14 @@ fn checkComptimeVarStore(
         }
         unreachable;
     }
+}
+
+/// Arrays and matrices share comptime memory handling: a matrix is an array of its columns.
+fn isArrayLike(ty: Type, zcu: *const Zcu) bool {
+    return switch (ty.zigTypeTag(zcu)) {
+        .array, .matrix => true,
+        else => false,
+    };
 }
 
 const std = @import("std");

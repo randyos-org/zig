@@ -4442,6 +4442,15 @@ fn validateArrayInitTy(
             }
             return;
         },
+        .matrix => {
+            const array_len = ty.arrayLen(zcu);
+            if (init_count != array_len) {
+                return sema.fail(block, src, "expected {d} matrix columns; found {d}", .{
+                    array_len, init_count,
+                });
+            }
+            return;
+        },
         .@"struct" => if (ty.isTuple(zcu)) {
             const array_len = ty.arrayLen(zcu);
             if (init_count > array_len) {
@@ -4703,6 +4712,12 @@ fn zirValidatePtrArrayInit(
 
         .vector => if (instrs.len != array_len) {
             return sema.fail(block, init_src, "expected {d} vector elements; found {d}", .{
+                array_len, instrs.len,
+            });
+        },
+
+        .matrix => if (instrs.len != array_len) {
+            return sema.fail(block, init_src, "expected {d} matrix columns; found {d}", .{
                 array_len, instrs.len,
             });
         },
@@ -9821,7 +9836,7 @@ fn zirArrayInitElemPtr(sema: *Sema, block: *Block, inst: Zir.Inst.Index) Compile
     const elem_index = try pt.intRef(.usize, extra.index);
     const array_ty = sema.typeOf(array_ptr).childType(zcu);
     switch (array_ty.zigTypeTag(zcu)) {
-        .array, .vector => {},
+        .array, .vector, .matrix => {},
         else => if (!array_ty.isTuple(zcu)) {
             return sema.failWithArrayInitNotSupported(block, src, array_ty);
         },
@@ -26419,6 +26434,18 @@ fn fieldVal(
                 );
             }
         },
+        .matrix => {
+            if (field_name.eqlSlice("len", ip)) {
+                return Air.internedToRef((try pt.intValue(.usize, inner_ty.arrayLen(zcu))).toIntern());
+            } else {
+                return sema.fail(
+                    block,
+                    field_name_src,
+                    "no member named '{f}' in '{f}'",
+                    .{ field_name.fmt(ip), object_ty.fmt(zcu) },
+                );
+            }
+        },
         .pointer => {
             const ptr_info = inner_ty.ptrInfo(zcu);
             if (ptr_info.flags.size == .slice) {
@@ -26721,6 +26748,19 @@ fn fieldPtr(
                     .packed_offset = ptr_ptr_info.packed_offset,
                 });
                 return sema.coerceCompatiblePtrs(block, result_ty, object_ptr, object_ptr_src);
+            } else {
+                return sema.fail(
+                    block,
+                    field_name_src,
+                    "no member named '{f}' in '{f}'",
+                    .{ field_name.fmt(ip), object_ty.fmt(zcu) },
+                );
+            }
+        },
+        .matrix => {
+            if (field_name.eqlSlice("len", ip)) {
+                const int_val = try pt.intValue(.usize, inner_ty.arrayLen(zcu));
+                return uavRef(sema, int_val);
             } else {
                 return sema.fail(
                     block,
@@ -27480,7 +27520,7 @@ fn elemPtr(
 
     const elem_ptr = switch (indexable_ty.zigTypeTag(zcu)) {
         .vector => try sema.elemPtrVector(block, indexable_ptr_src, indexable_ptr, elem_index_src, elem_index, init),
-        .array => try sema.elemPtrArray(block, src, indexable_ptr_src, indexable_ptr, elem_index_src, elem_index, init, oob_safety),
+        .array, .matrix => try sema.elemPtrArray(block, src, indexable_ptr_src, indexable_ptr, elem_index_src, elem_index, init, oob_safety),
         .@"struct" => try sema.tupleElemPtr(block, src, indexable_ptr, elem_index, elem_index_src),
         .spirv => try sema.elemPtrSpirvRuntimeArray(block, indexable_ptr, elem_index),
         else => {
@@ -27543,7 +27583,7 @@ fn elemPtrOneLayerOnly(
         .one => {
             const elem_ptr = switch (child_ty.zigTypeTag(zcu)) {
                 .vector => try sema.elemPtrVector(block, indexable_src, indexable, elem_index_src, elem_index, init),
-                .array => try sema.elemPtrArray(block, src, indexable_src, indexable, elem_index_src, elem_index, init, oob_safety),
+                .array, .matrix => try sema.elemPtrArray(block, src, indexable_src, indexable, elem_index_src, elem_index, init, oob_safety),
                 .@"struct" => try sema.tupleElemPtr(block, indexable_src, indexable, elem_index, elem_index_src),
                 .spirv => try sema.elemPtrSpirvRuntimeArray(block, indexable, elem_index),
                 else => unreachable, // Guaranteed by checkIndexable
@@ -27622,7 +27662,7 @@ fn elemVal(
                 },
             }
         },
-        .array => return sema.elemValArray(block, src, indexable_src, indexable, elem_index_src, elem_index, oob_safety),
+        .array, .matrix => return sema.elemValArray(block, src, indexable_src, indexable, elem_index_src, elem_index, oob_safety),
         .vector => {
             // TODO: If the index is a vector, the result should be a vector.
             return sema.elemValArray(block, src, indexable_src, indexable, elem_index_src, elem_index, oob_safety);
@@ -27899,7 +27939,7 @@ fn elemPtrArray(
     const array_ptr_ty = sema.typeOf(array_ptr);
     assert(array_ptr_ty.ptrSize(zcu) == .one);
     const array_ty = array_ptr_ty.childType(zcu);
-    assert(array_ty.zigTypeTag(zcu) == .array);
+    assert(array_ty.zigTypeTag(zcu) == .array or array_ty.zigTypeTag(zcu) == .matrix);
     const array_sent = array_ty.sentinel(zcu) != null;
     const array_len = array_ty.arrayLen(zcu);
     const array_len_s = array_len + @intFromBool(array_sent);

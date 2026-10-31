@@ -207,7 +207,7 @@ pub const MutableValue = union(enum) {
                     },
                 },
                 .undef => |ty_ip| switch (Type.fromInterned(ty_ip).zigTypeTag(zcu)) {
-                    .@"struct", .array, .vector => |type_tag| {
+                    .@"struct", .array, .vector, .matrix => |type_tag| {
                         const ty = Type.fromInterned(ty_ip);
                         if (type_tag == .@"struct" and ty.containerLayout(zcu) == .@"packed") return;
                         const opt_sent = ty.sentinel(zcu);
@@ -215,7 +215,7 @@ pub const MutableValue = union(enum) {
                             const len_no_sent = ip.aggregateTypeLen(ty_ip);
                             const elems = try arena.alloc(MutableValue, @intCast(len_no_sent + @intFromBool(opt_sent != null)));
                             switch (type_tag) {
-                                .array, .vector => {
+                                .array, .vector, .matrix => {
                                     const elem_ty = ip.childType(ty_ip);
                                     const undef_elem = try pt.intern(.{ .undef = elem_ty });
                                     @memset(elems[0..@intCast(len_no_sent)], .{ .interned = undef_elem });
@@ -449,7 +449,7 @@ pub const MutableValue = union(enum) {
             .interned => |ip_index| {
                 const ty = Type.fromInterned(pt.zcu.intern_pool.typeOf(ip_index));
                 switch (ty.zigTypeTag(pt.zcu)) {
-                    .array, .vector => return .{ .interned = (try Value.fromInterned(ip_index).elemValue(pt, field_idx)).toIntern() },
+                    .array, .vector, .matrix => return .{ .interned = (try Value.fromInterned(ip_index).elemValue(pt, field_idx)).toIntern() },
                     .@"struct", .@"union" => return .{ .interned = (try Value.fromInterned(ip_index).fieldValue(pt, field_idx)).toIntern() },
                     .pointer => {
                         assert(ty.isSlice(pt.zcu));

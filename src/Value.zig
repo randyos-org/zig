@@ -2190,7 +2190,6 @@ pub fn pointerDerivation(ptr_val: Value, arena: Allocator, zcu: *Zcu, opt_sema: 
             .frame,
             .@"enum",
             .vector,
-            .matrix,
             .@"union",
             => break,
 
@@ -2220,7 +2219,7 @@ pub fn pointerDerivation(ptr_val: Value, arena: Allocator, zcu: *Zcu, opt_sema: 
                 break;
             },
 
-            .array => {
+            .array, .matrix => {
                 const elem_ty = cur_derive.elem_ty.childType(zcu);
                 const elem_size = elem_ty.abiSize(zcu);
                 const start_idx = cur_offset / elem_size;

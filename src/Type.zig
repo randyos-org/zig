@@ -2246,11 +2246,11 @@ pub fn isArrayOrVector(ty: Type, zcu: *const Zcu) bool {
 
 pub fn isIndexable(ty: Type, zcu: *const Zcu) bool {
     return switch (ty.zigTypeTag(zcu)) {
-        .array, .vector => true,
+        .array, .vector, .matrix => true,
         .pointer => switch (ty.ptrSize(zcu)) {
             .slice, .many, .c => true,
             .one => switch (ty.childType(zcu).zigTypeTag(zcu)) {
-                .array, .vector => true,
+                .array, .vector, .matrix => true,
                 .@"struct" => ty.childType(zcu).isTuple(zcu),
                 .spirv => ty.childType(zcu).isSpirvRuntimeArray(zcu),
                 else => false,
@@ -2264,12 +2264,12 @@ pub fn isIndexable(ty: Type, zcu: *const Zcu) bool {
 
 pub fn indexableHasLen(ty: Type, zcu: *const Zcu) bool {
     return switch (ty.zigTypeTag(zcu)) {
-        .array, .vector => true,
+        .array, .vector, .matrix => true,
         .pointer => switch (ty.ptrSize(zcu)) {
             .many, .c => false,
             .slice => true,
             .one => switch (ty.childType(zcu).zigTypeTag(zcu)) {
-                .array, .vector => true,
+                .array, .vector, .matrix => true,
                 .@"struct" => ty.childType(zcu).isTuple(zcu),
                 else => false,
             },
@@ -2751,7 +2751,7 @@ pub fn getCaptures(ty: Type, zcu: *const Zcu) InternPool.CaptureValue.Slice {
 pub fn arrayBase(ty: Type, zcu: *const Zcu) struct { Type, u64 } {
     var cur_ty: Type = ty;
     var cur_len: u64 = 1;
-    while (cur_ty.zigTypeTag(zcu) == .array) {
+    while (cur_ty.zigTypeTag(zcu) == .array or cur_ty.zigTypeTag(zcu) == .matrix) {
         cur_len *= cur_ty.arrayLenIncludingSentinel(zcu);
         cur_ty = cur_ty.childType(zcu);
     }
@@ -3067,7 +3067,7 @@ pub fn containerTypeName(ty: Type, ip: *const InternPool) struct {
 
 pub fn destructurable(ty: Type, zcu: *const Zcu) bool {
     return switch (ty.zigTypeTag(zcu)) {
-        .array, .vector => true,
+        .array, .vector, .matrix => true,
         .@"struct" => ty.isTuple(zcu),
         else => false,
     };

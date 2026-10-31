@@ -68,3 +68,44 @@ test "@Matrix coerces from a tuple of columns" {
     try S.doTheTest();
     try comptime S.doTheTest();
 }
+
+test "@Matrix init syntax and indexing" {
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_riscv64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest;
+    if (builtin.cpu.arch.isSpirv()) return error.SkipZigTest;
+
+    const S = struct {
+        fn doTheTest() !void {
+            const M = @Matrix(3, 2, f32);
+            var x: f32 = 1;
+            _ = &x;
+            var m: M = .{ .{ x, 2, 3 }, .{ 4, 5, 6 } };
+            try expect(m.len == 2);
+            try expectEqual(@Vector(3, f32){ 1, 2, 3 }, m[0]);
+            try expectEqual(@Vector(3, f32){ 4, 5, 6 }, m[1]);
+            try expect(m[1][2] == 6);
+
+            var i: usize = 1;
+            _ = &i;
+            try expectEqual(@Vector(3, f32){ 4, 5, 6 }, m[i]);
+
+            m[0] = .{ 7, 8, 9 };
+            m[1][0] = 10;
+            const back: [2][3]f32 = m;
+            try expectEqual([2][3]f32{ .{ 7, 8, 9 }, .{ 10, 5, 6 } }, back);
+
+            const typed = M{ m[1], m[0] };
+            const c0, const c1 = typed;
+            try expectEqual(m[1], c0);
+            try expectEqual(m[0], c1);
+
+            var sum: f32 = 0;
+            for (typed) |column| sum += @reduce(.Add, column);
+            try expect(sum == 45);
+        }
+    };
+    try S.doTheTest();
+    try comptime S.doTheTest();
+}

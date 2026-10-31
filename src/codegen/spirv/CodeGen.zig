@@ -571,6 +571,16 @@ pub fn vectorType(cg: *CodeGen, len: u32, child_ty_id: Id) !Id {
     return result_id;
 }
 
+pub fn matrixType(cg: *CodeGen, cols: u32, column_ty_id: Id) !Id {
+    const result_id = cg.allocId();
+    try cg.module.emit(cg.gpa, .OpTypeMatrix, .{
+        .id_result = result_id,
+        .column_type = column_ty_id,
+        .column_count = cols,
+    });
+    return result_id;
+}
+
 pub fn arrayType(cg: *CodeGen, len_id: Id, child_ty_id: Id) !Id {
     const result_id = cg.allocId();
     try cg.module.emit(cg.gpa, .OpTypeArray, .{
@@ -650,6 +660,7 @@ pub fn layoutType(cg: *CodeGen, ty: Type, is_block_root: bool) Error!Id {
                 try cg.decorateMember(id, @intCast(member_types.items.len), .{ .offset = .{
                     .byte_offset = @intCast(ty.structFieldOffset(field_index, zcu)),
                 } });
+                try cg.decorateMatrixMember(id, @intCast(member_types.items.len), field_ty);
                 try member_types.append(gpa, try cg.layoutType(field_ty, false));
             }
             try cg.module.emit(gpa, .OpTypeStruct, .{
@@ -702,6 +713,7 @@ pub fn layoutType(cg: *CodeGen, ty: Type, is_block_root: bool) Error!Id {
             break :id id;
         },
         .array, .matrix => id: {
+            if (cg.isSpvMatrix(ty)) return cg.resolveType(ty, .indirect);
             const elem_ty = ty.childType(zcu);
             const elem_ty_id = try cg.layoutType(elem_ty, is_block_root);
             const total_len = std.math.cast(u32, ty.arrayLenIncludingSentinel(zcu)) orelse
@@ -853,6 +865,7 @@ fn decorateLayout(cg: *CodeGen, ty: Type, ty_id: spec.Id) Error!void {
         .array, .matrix => {
             const elem_ty = ty.childType(zcu);
             if (!elem_ty.hasRuntimeBits(zcu)) return;
+            if (cg.isSpvMatrix(ty)) return;
             try cg.decorate(ty_id, .{
                 .array_stride = .{ .array_stride = @intCast(elem_ty.abiSize(zcu)) },
             });
@@ -877,6 +890,7 @@ fn decorateLayout(cg: *CodeGen, ty: Type, ty_id: spec.Id) Error!void {
                     if (!field_ty.hasRuntimeBits(zcu)) continue;
                     const offset: u32 = @intCast(ty.structFieldOffset(field_index, zcu));
                     try cg.decorateMember(ty_id, member, .{ .offset = .{ .byte_offset = offset } });
+                    try cg.decorateMatrixMember(ty_id, member, field_ty);
                     try cg.decorateLayout(field_ty, try cg.resolveType(field_ty, .indirect));
                     member += 1;
                 }
@@ -1116,6 +1130,34 @@ fn isSpvVector(cg: *CodeGen, ty: Type) bool {
     }
 
     return false;
+}
+
+/// Whether `ty` lowers to OpTypeMatrix: 2 to 4 columns of 2 to 4 floats, on
+/// shader targets, which have the Matrix capability. Other matrices lower to
+/// an array of their columns.
+fn isSpvMatrix(cg: *CodeGen, ty: Type) bool {
+    const zcu = cg.zcu;
+    const target = zcu.getTarget();
+    if (ty.zigTypeTag(zcu) != .matrix) return false;
+    if (target.os.tag != .vulkan and target.os.tag != .opengl) return false;
+    const column_ty = ty.childType(zcu);
+    const cols = ty.arrayLen(zcu);
+    const rows = column_ty.vectorLen(zcu);
+    return cols >= 2 and cols <= 4 and rows >= 2 and rows <= 4 and cg.isSpvVector(column_ty);
+}
+
+/// Matrices in an explicitly laid out struct need their stride and order
+/// decorated on the member that holds them, or on the member holding an
+/// array of them.
+fn decorateMatrixMember(cg: *CodeGen, struct_id: Id, member: u32, member_ty: Type) !void {
+    const zcu = cg.zcu;
+    var matrix_ty = member_ty;
+    while (matrix_ty.zigTypeTag(zcu) == .array) matrix_ty = matrix_ty.childType(zcu);
+    if (!cg.isSpvMatrix(matrix_ty)) return;
+    try cg.decorateMember(struct_id, member, .col_major);
+    try cg.decorateMember(struct_id, member, .{ .matrix_stride = .{
+        .matrix_stride = @intCast(matrix_ty.childType(zcu).abiSize(zcu)),
+    } });
 }
 
 /// Emits a bool constant in a particular representation.
@@ -2023,6 +2065,10 @@ fn resolveType(cg: *CodeGen, ty: Type, repr: Repr) Error!Id {
             return try cg.floatType(bits);
         },
         .array, .matrix => {
+            if (cg.isSpvMatrix(ty)) {
+                const column_ty_id = try cg.resolveType(ty.childType(zcu), .direct);
+                return try cg.matrixType(@intCast(ty.arrayLen(zcu)), column_ty_id);
+            }
             const elem_ty = ty.childType(zcu);
             const elem_ty_id = try cg.resolveType(elem_ty, .indirect);
             const total_len = std.math.cast(u32, ty.arrayLenIncludingSentinel(zcu)) orelse {
@@ -3829,7 +3875,8 @@ fn needsLayout(cg: *CodeGen, as: std.lang.AddressSpace, pointee_ty: Type) bool {
         .storage_buffer,
         .physical_storage_buffer,
         => switch (pointee_ty.zigTypeTag(cg.zcu)) {
-            .@"struct", .@"union", .array, .matrix => true,
+            .@"struct", .@"union", .array => true,
+            .matrix => !cg.isSpvMatrix(pointee_ty),
             .spirv => pointee_ty.isSpirvRuntimeArray(cg.zcu),
             else => false,
         },
