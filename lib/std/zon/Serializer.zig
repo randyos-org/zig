@@ -1010,6 +1010,7 @@ fn canSerializeTypeInner(
         .@"anyframe",
         .@"opaque",
         .spirv,
+        .matrix,
         => false,
 
         .@"enum" => |@"enum"| @"enum".mode == .exhaustive,

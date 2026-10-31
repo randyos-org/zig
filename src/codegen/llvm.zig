@@ -1552,7 +1552,7 @@ pub const Object = struct {
                     0, // offset
                 );
             },
-            .array => return o.builder.debugArrayType(
+            .array, .matrix => return o.builder.debugArrayType(
                 name,
                 null, // file
                 o.debug_compile_unit.unwrap().?, // scope
@@ -2802,6 +2802,10 @@ pub const Object = struct {
                     const child_llvm_ty = try o.lowerType(.fromInterned(vector_type.child), .as_value);
                     return o.builder.vectorType(.normal, vector_type.len, child_llvm_ty);
                 },
+                .matrix_type => |matrix_type| o.builder.arrayType(
+                    matrix_type.cols,
+                    try o.lowerType(.fromInterned(matrix_type.column), repr),
+                ),
                 .opt_type => |child_ty| {
                     // Must stay in sync with `opt_payload` logic in `lowerPtr`.
                     switch (Type.fromInterned(child_ty).classify(zcu)) {
@@ -3275,6 +3279,7 @@ pub const Object = struct {
             .ptr_type,
             .array_type,
             .vector_type,
+            .matrix_type,
             .opt_type,
             .anyframe_type,
             .error_union_type,
@@ -3527,6 +3532,23 @@ pub const Object = struct {
                             return o.builder.arrayConst(vector_ty, vals);
                         } else return o.builder.splatConst(vector_ty, try o.lowerValue(elem, .as_value)),
                     }
+                },
+                .matrix_type => |matrix_type| {
+                    const matrix_ty = try o.lowerType(ty, repr);
+                    const ExpectedContents = [Builder.expected_fields_len]Builder.Constant;
+                    var bfa_buf: ExpectedContents = undefined;
+                    var bfa: std.heap.BufferFirstAllocator = .init(@ptrCast(&bfa_buf), o.gpa);
+                    const allocator = bfa.allocator();
+                    const vals = try allocator.alloc(Builder.Constant, matrix_type.cols);
+                    defer allocator.free(vals);
+                    switch (aggregate.storage) {
+                        .bytes => unreachable,
+                        .elems => |elems| for (vals, elems) |*result_val, elem| {
+                            result_val.* = try o.lowerValue(elem, repr);
+                        },
+                        .repeated_elem => |elem| @memset(vals, try o.lowerValue(elem, repr)),
+                    }
+                    return o.builder.arrayConst(matrix_ty, vals);
                 },
                 .tuple_type => |tuple| {
                     const struct_ty = try o.lowerType(ty, repr);

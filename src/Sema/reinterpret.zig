@@ -145,6 +145,7 @@ const UnpackValueBytes = struct {
             .ptr_type,
             .array_type,
             .vector_type,
+            .matrix_type,
             .opt_type,
             .anyframe_type,
             .error_union_type,
@@ -180,6 +181,7 @@ const UnpackValueBytes = struct {
 
             .aggregate => switch (ty.zigTypeTag(zcu)) {
                 .vector => unreachable, // ill-defined layout
+                .matrix => unreachable, // ill-defined layout
                 .array => {
                     for (0..@intCast(ty.arrayLen(zcu))) |elem_index| {
                         const elem_val = try val.elemValue(pt, @intCast(elem_index));
@@ -312,6 +314,7 @@ const PackValueBytes = struct {
         const arena = pack.arena;
         switch (ty.zigTypeTag(zcu)) {
             .vector => unreachable, // ill-defined layout
+            .matrix => unreachable, // ill-defined layout
             .array => {
                 // Each element is padded up to its ABI size. The final element does not have trailing padding.
                 const elem_ty = ty.childType(zcu);

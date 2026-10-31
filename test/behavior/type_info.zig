@@ -271,11 +271,11 @@ fn testUnion() !void {
     try expect(typeinfo_info == .@"union");
     try expect(typeinfo_info.@"union".layout == .auto);
     try expect(typeinfo_info.@"union".tag_type.? == TypeId);
-    try expect(typeinfo_info.@"union".field_names.len == 25);
+    try expect(typeinfo_info.@"union".field_names.len == 26);
     try expect(typeinfo_info.@"union".field_names.len == typeinfo_info.@"union".field_types.len);
     try expect(typeinfo_info.@"union".field_names.len == typeinfo_info.@"union".field_attrs.len);
     try expect(typeinfo_info.@"union".field_types[4] == @TypeOf(@typeInfo(u8).int));
-    try expect(typeinfo_info.@"union".decl_names.len == 17);
+    try expect(typeinfo_info.@"union".decl_names.len == 18);
 
     const TestNoTagUnion = union {
         Foo: void,

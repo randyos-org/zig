@@ -1091,6 +1091,12 @@ fn builtinCall(astrl: *AstRlAnnotate, block: ?*Block, ri: ResultInfo, node: Ast.
             _ = try astrl.expr(args[1], block, ResultInfo.type_only);
             return false;
         },
+        .Matrix => {
+            _ = try astrl.expr(args[0], block, ResultInfo.type_only);
+            _ = try astrl.expr(args[1], block, ResultInfo.type_only);
+            _ = try astrl.expr(args[2], block, ResultInfo.type_only);
+            return false;
+        },
         .prefetch => {
             _ = try astrl.expr(args[0], block, ResultInfo.none);
             _ = try astrl.expr(args[1], block, ResultInfo.type_only);

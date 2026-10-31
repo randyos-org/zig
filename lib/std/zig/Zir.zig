@@ -2096,6 +2096,9 @@ pub const Inst = struct {
         /// Implements builtin `@SpirvType`.
         /// `operand` is payload index to `ReifyFn`.
         reify_spirv_type,
+        /// Implements builtin `@Matrix`.
+        /// `operand` is payload index to `MatrixType`.
+        matrix_type,
         /// Implements the `@cmpxchgStrong` and `@cmpxchgWeak` builtins.
         /// `small` 0=>weak 1=>strong
         /// `operand` is payload index to `Cmpxchg`.
@@ -3228,6 +3231,13 @@ pub const Inst = struct {
         node: Ast.Node.Offset,
         lhs: Ref,
         rhs: Ref,
+    };
+
+    pub const MatrixType = struct {
+        node: Ast.Node.Offset,
+        rows: Ref,
+        cols: Ref,
+        elem_type: Ref,
     };
 
     pub const ReifySliceArgInfo = enum(u16) {
@@ -4425,6 +4435,7 @@ fn findTrackableInner(
                 .reify_pointer,
                 .reify_fn,
                 .cmpxchg,
+                .matrix_type,
                 .c_va_arg,
                 .c_va_copy,
                 .c_va_end,

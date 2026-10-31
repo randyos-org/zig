@@ -118,6 +118,7 @@ pub fn classifyType(ty: Type, zcu: *Zcu, ctx: Context) Class {
         .spirv,
         .enum_literal,
         .array,
+        .matrix,
         => unreachable,
     }
 }

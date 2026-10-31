@@ -2293,6 +2293,7 @@ pub fn updateComptimeGlobal(
         .ptr_type,
         .array_type,
         .vector_type,
+        .matrix_type,
         .opt_type,
         .error_union_type,
         .anyframe_type,
@@ -2613,6 +2614,17 @@ fn updateConstInner(
             try dwarf.abbrevCode(di_nw, .array_len);
             try dwarf.refType(pt, di_nw, .usize);
             try di_w.writeUleb128(vector_type.len);
+            try di_w.writeUleb128(@backingInt(AbbrevCode.null));
+        },
+        .matrix_type => |matrix_type| {
+            const name = try zcu.gpa.print("{f}", .{Type.fromInterned(@"const").fmt(zcu)});
+            defer zcu.gpa.free(name);
+            try dwarf.abbrevCode(di_nw, .array_type);
+            try dwarf.strx(di_nw, name);
+            try dwarf.refType(pt, di_nw, .fromInterned(matrix_type.column));
+            try dwarf.abbrevCode(di_nw, .array_len);
+            try dwarf.refType(pt, di_nw, .usize);
+            try di_w.writeUleb128(matrix_type.cols);
             try di_w.writeUleb128(@backingInt(AbbrevCode.null));
         },
         .opt_type => |opt_child_type_index| {
@@ -3776,6 +3788,28 @@ fn updateConstInner(
                 },
                 inline .array_type, .vector_type => |sequence_type| {
                     const child_ty: Type = .fromInterned(sequence_type.child);
+                    const child_class = child_ty.classify(zcu);
+                    for (switch (aggregate.storage) {
+                        .bytes => unreachable,
+                        .elems => |elems| elems,
+                        .repeated_elem => |*repeated_elem| repeated_elem[0..1],
+                    }) |elem| {
+                        try dwarf.abbrevCode(di_nw, if (child_class.comptimeOnly())
+                            .comptime_value_elem_comptime
+                        else if (child_class.hasRuntimeBits())
+                            .comptime_value_elem_runtime
+                        else
+                            break);
+                        if (child_class.comptimeOnly())
+                            try dwarf.refConst(pt, di_nw, .fromInterned(elem))
+                        else if (child_class.hasRuntimeBits())
+                            try dwarf.blockConst(pt, di_nw, .fromInterned(elem))
+                        else
+                            unreachable;
+                    }
+                },
+                .matrix_type => |matrix_type| {
+                    const child_ty: Type = .fromInterned(matrix_type.column);
                     const child_class = child_ty.classify(zcu);
                     for (switch (aggregate.storage) {
                         .bytes => unreachable,

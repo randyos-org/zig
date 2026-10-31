@@ -1005,6 +1005,7 @@ pub const DeclGen = struct {
             .ptr_type,
             .array_type,
             .vector_type,
+            .matrix_type,
             .opt_type,
             .anyframe_type,
             .error_union_type,
@@ -1250,7 +1251,7 @@ pub const DeclGen = struct {
                 },
             },
             .aggregate => switch (ip.indexToKey(ty.toIntern())) {
-                .array_type, .vector_type => {
+                .array_type, .vector_type, .matrix_type => {
                     if (!location.isInitializer()) {
                         try w.writeByte('(');
                         try dg.renderType(w, ty);
@@ -1676,7 +1677,7 @@ pub const DeclGen = struct {
                     }
                     try w.writeAll(" }");
                 },
-                .array_type, .vector_type => {
+                .array_type, .vector_type, .matrix_type => {
                     if (!location.isInitializer()) {
                         try w.writeByte('(');
                         try dg.renderType(w, ty);
@@ -7070,6 +7071,15 @@ fn airAggregateInit(f: *Function, inst: Air.Inst.Index) !CValue {
                 try f.writeCValueMember(w, local, .{ .identifier = "array" });
                 try w.print("[{d}] = ", .{info.len});
                 try f.dg.renderValue(w, Value.fromInterned(info.sentinel), .other);
+                try w.writeByte(';');
+                try f.newline();
+            }
+        },
+        .matrix_type => {
+            for (resolved_elements, 0..) |element, i| {
+                try f.writeCValueMember(w, local, .{ .identifier = "array" });
+                try w.print("[{d}] = ", .{i});
+                try f.writeCValue(w, element, .other);
                 try w.writeByte(';');
                 try f.newline();
             }

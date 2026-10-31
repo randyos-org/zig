@@ -702,6 +702,17 @@ const Writer = struct {
                 try self.writeSrcNode(stream, .zero);
             },
 
+            .matrix_type => {
+                const inst_data = self.code.extraData(Zir.Inst.MatrixType, extended.operand).data;
+                try self.writeInstRef(stream, inst_data.rows);
+                try stream.writeAll(", ");
+                try self.writeInstRef(stream, inst_data.cols);
+                try stream.writeAll(", ");
+                try self.writeInstRef(stream, inst_data.elem_type);
+                try stream.writeAll(")) ");
+                try self.writeSrcNode(stream, inst_data.node);
+            },
+
             .cmpxchg => try self.writeCmpxchg(stream, extended),
             .ptr_cast_full => try self.writePtrCastFull(stream, extended),
             .ptr_cast_no_dest => try self.writePtrCastNoDest(stream, extended),

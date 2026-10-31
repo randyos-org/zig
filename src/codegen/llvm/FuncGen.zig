@@ -6501,7 +6501,7 @@ fn airAggregateInit(fg: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.
                 return alloca_inst;
             },
         },
-        .array => {
+        .array, .matrix => {
             assert(isByRef(result_ty, zcu));
 
             const alloca_inst = try fg.buildZigAlloca(result_ty, .none);
@@ -7977,6 +7977,7 @@ pub fn isByRef(ty: Type, zcu: *const Zcu) bool {
         },
 
         .array,
+        .matrix,
         .frame,
         => ty.hasRuntimeBits(zcu),
 

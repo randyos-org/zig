@@ -1966,6 +1966,7 @@ pub const Key = union(enum) {
     ptr_type: PtrType,
     array_type: ArrayType,
     vector_type: VectorType,
+    matrix_type: MatrixType,
     opt_type: Index,
     /// `anyframe->T`. The payload is the child type, which may be `none` to indicate
     /// `anyframe`.
@@ -2105,6 +2106,12 @@ pub const Key = union(enum) {
     pub const VectorType = extern struct {
         len: u32,
         child: Index,
+    };
+
+    /// Extern so that hashing can be done via memory reinterpreting.
+    pub const MatrixType = extern struct {
+        cols: u32,
+        column: Index,
     };
 
     pub const TupleType = struct {
@@ -2611,6 +2618,7 @@ pub const Key = union(enum) {
             inline .ptr_type,
             .array_type,
             .vector_type,
+            .matrix_type,
             .opt_type,
             .anyframe_type,
             .error_union_type,
@@ -2723,6 +2731,7 @@ pub const Key = union(enum) {
                 const child = switch (ip.indexToKey(aggregate.ty)) {
                     .array_type => |array_type| array_type.child,
                     .vector_type => |vector_type| vector_type.child,
+                    .matrix_type => |matrix_type| matrix_type.column,
                     .tuple_type, .struct_type => .none,
                     else => unreachable,
                 };
@@ -2856,6 +2865,10 @@ pub const Key = union(enum) {
             },
             .vector_type => |a_info| {
                 const b_info = b.vector_type;
+                return std.meta.eql(a_info, b_info);
+            },
+            .matrix_type => |a_info| {
+                const b_info = b.matrix_type;
                 return std.meta.eql(a_info, b_info);
             },
             .opt_type => |a_info| {
@@ -3155,6 +3168,7 @@ pub const Key = union(enum) {
             .ptr_type,
             .array_type,
             .vector_type,
+            .matrix_type,
             .opt_type,
             .anyframe_type,
             .error_union_type,
@@ -4215,6 +4229,7 @@ pub const Index = enum(u32) {
         type_array_big: struct { data: *Array },
         type_array_small: struct { data: *Vector },
         type_vector: struct { data: *Vector },
+        type_matrix: struct { data: *Vector },
         type_pointer: struct { data: *Tag.TypePointer },
         type_slice: DataIsIndex,
         type_optional: DataIsIndex,
@@ -4810,6 +4825,9 @@ pub const Tag = enum(u8) {
     /// A vector type.
     /// data is payload to Vector.
     type_vector,
+    /// A matrix type.
+    /// data is payload to Vector.
+    type_matrix,
     /// A fully explicitly specified pointer type.
     type_pointer,
     /// A slice type.
@@ -5163,6 +5181,7 @@ pub const Tag = enum(u8) {
         },
         .type_array_small = .{ .summary = .@"[{.payload.len%value}]{.payload.child%summary}", .payload = Vector },
         .type_vector = .{ .summary = .@"@Vector({.payload.len%value}, {.payload.child%summary})", .payload = Vector },
+        .type_matrix = .{ .summary = .@"@Matrix({.payload.len%value}, {.payload.child%summary})", .payload = Vector },
         .type_pointer = .{ .summary = .@"*... {.payload.child%summary}", .payload = TypePointer },
         .type_slice = .{ .summary = .@"[]... {.data.unwrapped.payload.child%summary}", .data = Index },
         .type_optional = .{ .summary = .@"?{.data%summary}", .data = Index },
@@ -6496,6 +6515,13 @@ pub fn indexToKey(ip: *const InternPool, index: Index) Key {
                 .child = vector_info.child,
             } };
         },
+        .type_matrix => {
+            const matrix_info = extraData(unwrapped_index.getExtra(ip), Vector, data);
+            return .{ .matrix_type = .{
+                .cols = matrix_info.len,
+                .column = matrix_info.child,
+            } };
+        },
 
         .type_pointer => .{ .ptr_type = extraData(unwrapped_index.getExtra(ip), Tag.TypePointer, data) },
 
@@ -6847,6 +6873,7 @@ pub fn indexToKey(ip: *const InternPool, index: Index) Key {
                 },
                 .type_array_small,
                 .type_vector,
+                .type_matrix,
                 .type_struct_packed_auto,
                 .type_struct_packed_explicit,
                 => .{ .aggregate = .{
@@ -7340,6 +7367,15 @@ pub fn get(ip: *InternPool, gpa: Allocator, io: Io, tid: Zcu.PerThread.Id, key: 
                 }),
             });
         },
+        .matrix_type => |matrix_type| {
+            items.appendAssumeCapacity(.{
+                .tag = .type_matrix,
+                .data = try addExtra(extra, Vector{
+                    .len = matrix_type.cols,
+                    .child = matrix_type.column,
+                }),
+            });
+        },
         .opt_type => |payload_type| {
             assert(payload_type != .none);
             items.appendAssumeCapacity(.{
@@ -7804,6 +7840,7 @@ pub fn get(ip: *InternPool, gpa: Allocator, io: Io, tid: Zcu.PerThread.Id, key: 
             const child: Index, const sentinel: Index = switch (ty_key) {
                 .array_type => |array_type| .{ array_type.child, array_type.sentinel },
                 .vector_type => |vector_type| .{ vector_type.child, .none },
+                .matrix_type => |matrix_type| .{ matrix_type.column, .none },
                 .tuple_type => .{ .none, .none },
                 .struct_type => child: {
                     assert(ip.loadStructType(aggregate.ty).layout != .@"packed");
@@ -7830,7 +7867,7 @@ pub fn get(ip: *InternPool, gpa: Allocator, io: Io, tid: Zcu.PerThread.Id, key: 
                 },
             }
             if (aggregate.storage.values().len > 0) switch (ty_key) {
-                .array_type, .vector_type => {
+                .array_type, .vector_type, .matrix_type => {
                     var any_defined = false;
                     for (aggregate.storage.values()) |elem| {
                         if (!ip.isUndef(elem)) any_defined = true;
@@ -10072,6 +10109,7 @@ pub fn childType(ip: *const InternPool, i: Index) Index {
     return switch (ip.indexToKey(i)) {
         .ptr_type => |ptr_type| ptr_type.child,
         .vector_type => |vector_type| vector_type.child,
+        .matrix_type => |matrix_type| matrix_type.column,
         .array_type => |array_type| array_type.child,
         .opt_type, .anyframe_type => |child| child,
         .spirv_type => blk: {
@@ -10324,11 +10362,13 @@ pub fn getCoerced(
             direct: {
                 const old_ty_child = switch (ip.indexToKey(old_ty)) {
                     inline .array_type, .vector_type => |seq_type| seq_type.child,
+                    .matrix_type => |matrix_type| matrix_type.column,
                     .tuple_type, .struct_type => break :direct,
                     else => unreachable,
                 };
                 const new_ty_child = switch (ip.indexToKey(new_ty)) {
                     inline .array_type, .vector_type => |seq_type| seq_type.child,
+                    .matrix_type => |matrix_type| matrix_type.column,
                     .tuple_type, .struct_type => break :direct,
                     else => unreachable,
                 };
@@ -10378,6 +10418,7 @@ pub fn getCoerced(
             for (agg_elems, 0..) |*elem, i| {
                 const new_elem_ty = switch (ip.indexToKey(new_ty)) {
                     inline .array_type, .vector_type => |seq_type| seq_type.child,
+                    .matrix_type => |matrix_type| matrix_type.column,
                     .tuple_type => |tuple_type| tuple_type.types.get(ip)[i],
                     .struct_type => ip.loadStructType(new_ty).field_types.get(ip)[i],
                     else => unreachable,
@@ -10578,7 +10619,7 @@ pub fn isErrorUnionType(ip: *const InternPool, ty: Index) bool {
 
 pub fn isAggregateType(ip: *const InternPool, ty: Index) bool {
     return switch (ip.indexToKey(ty)) {
-        .array_type, .vector_type, .tuple_type, .struct_type => true,
+        .array_type, .vector_type, .matrix_type, .tuple_type, .struct_type => true,
         else => false,
     };
 }
@@ -10747,6 +10788,7 @@ fn dumpStatsFallible(ip: *const InternPool, arena: Allocator, w: *Io.Writer) (Al
                 .type_array_small => @sizeOf(Vector),
                 .type_array_big => @sizeOf(Array),
                 .type_vector => @sizeOf(Vector),
+                .type_matrix => @sizeOf(Vector),
                 .type_pointer => @sizeOf(Tag.TypePointer),
                 .type_slice => 0,
                 .type_optional => 0,
@@ -11010,6 +11052,7 @@ fn dumpAllFallible(ip: *const InternPool, w: *Io.Writer) Io.Writer.Error!void {
                 .type_array_small,
                 .type_array_big,
                 .type_vector,
+                .type_matrix,
                 .type_pointer,
                 .type_optional,
                 .type_anyframe,
@@ -11737,6 +11780,7 @@ pub fn typeOf(ip: *const InternPool, index: Index) Index {
                 .type_array_big,
                 .type_array_small,
                 .type_vector,
+                .type_matrix,
                 .type_pointer,
                 .type_slice,
                 .type_optional,
@@ -11856,6 +11900,7 @@ pub fn aggregateTypeLen(ip: *const InternPool, ty: Index) u64 {
         .tuple_type => |tuple_type| tuple_type.types.len,
         .array_type => |array_type| array_type.len,
         .vector_type => |vector_type| vector_type.len,
+        .matrix_type => |matrix_type| matrix_type.cols,
         else => unreachable,
     };
 }
@@ -11866,6 +11911,7 @@ pub fn aggregateTypeLenIncludingSentinel(ip: *const InternPool, ty: Index) u64 {
         .tuple_type => |tuple_type| tuple_type.types.len,
         .array_type => |array_type| array_type.lenIncludingSentinel(),
         .vector_type => |vector_type| vector_type.len,
+        .matrix_type => |matrix_type| matrix_type.cols,
         else => unreachable,
     };
 }
@@ -12080,6 +12126,7 @@ pub fn zigTypeTag(ip: *const InternPool, index: Index) std.lang.TypeId {
             => .array,
 
             .type_vector => .vector,
+            .type_matrix => .matrix,
 
             .type_pointer,
             .type_slice,

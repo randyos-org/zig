@@ -127,6 +127,14 @@ fn expectEqualInner(comptime T: type, expected: T, actual: T) !void {
             try expectEqualSlices(info.child, &expect_array, &actual_array);
         },
 
+        .matrix => |info| {
+            const expect_array: [info.cols][info.rows]info.child = expected;
+            const actual_array: [info.cols][info.rows]info.child = actual;
+            inline for (0..info.cols) |col| {
+                try expectEqualSlices(info.child, &expect_array[col], &actual_array[col]);
+            }
+        },
+
         .@"struct" => |@"struct"| {
             inline for (@"struct".field_names) |field_name| {
                 try expectEqual(@field(expected, field_name), @field(actual, field_name));
@@ -876,6 +884,19 @@ fn expectEqualDeepInner(comptime T: type, expected: T, actual: T) error{TestExpe
                 expectEqualDeep(expected[i], actual[i]) catch |e| {
                     failPrint("index {d} incorrect. expected {any}, found {any}\n", .{
                         i, expected[i], actual[i],
+                    });
+                    return e;
+                };
+            }
+        },
+
+        .matrix => |info| {
+            const expect_array: [info.cols][info.rows]info.child = expected;
+            const actual_array: [info.cols][info.rows]info.child = actual;
+            inline for (0..info.cols) |col| {
+                expectEqualDeep(expect_array[col], actual_array[col]) catch |e| {
+                    failPrint("column {d} incorrect. expected {any}, found {any}\n", .{
+                        col, expect_array[col], actual_array[col],
                     });
                     return e;
                 };

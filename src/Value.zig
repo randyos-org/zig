@@ -326,6 +326,7 @@ pub fn writeToMemory(val: Value, zcu: *const Zcu, buffer: []u8) error{
             }
         },
         .vector => return error.IllDefinedMemoryLayout,
+        .matrix => return error.IllDefinedMemoryLayout,
         .@"struct" => {
             const struct_type = zcu.typeToStruct(ty) orelse return error.IllDefinedMemoryLayout;
             switch (struct_type.layout) {
@@ -2189,6 +2190,7 @@ pub fn pointerDerivation(ptr_val: Value, arena: Allocator, zcu: *Zcu, opt_sema: 
             .frame,
             .@"enum",
             .vector,
+            .matrix,
             .@"union",
             => break,
 
@@ -2375,6 +2377,7 @@ pub fn interpret(val: Value, comptime T: type, pt: Zcu.PerThread) error{ OutOfMe
         .frame,
         .@"anyframe",
         .vector,
+        .matrix,
         => comptime unreachable, // unsupported
 
         .void => {},
@@ -2479,6 +2482,7 @@ pub fn uninterpret(val: anytype, ty: Type, pt: Zcu.PerThread) error{ OutOfMemory
         .frame,
         .@"anyframe",
         .vector,
+        .matrix,
         => comptime unreachable, // unsupported
 
         .void => .void,

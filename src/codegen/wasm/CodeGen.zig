@@ -1293,6 +1293,7 @@ fn isByRef(ty: Type, zcu: *const Zcu, target: *const std.Target) bool {
         => return false,
 
         .array,
+        .matrix,
         .frame,
         => return ty.hasRuntimeBits(zcu),
         .@"struct", .@"union" => switch (ty.containerLayout(zcu)) {
@@ -5100,6 +5101,7 @@ fn lowerConstant(cg: *CodeGen, val: Value) InnerError!WValue {
         .ptr_type,
         .array_type,
         .vector_type,
+        .matrix_type,
         .opt_type,
         .anyframe_type,
         .error_union_type,
@@ -5738,7 +5740,7 @@ fn bitcastClass(cg: *CodeGen, ty: Type) BitcastClass {
         .@"union",
         => .{ .int = .fromType(cg, ty) },
         .float => .{ .float = .fromType(cg, ty) },
-        .array, .vector => .aggregate,
+        .array, .vector, .matrix => .aggregate,
         else => unreachable,
     };
 }
@@ -6998,7 +7000,7 @@ fn airAggregateInit(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
 
     const result: WValue = result_value: {
         switch (result_ty.zigTypeTag(zcu)) {
-            .array, .vector => {
+            .array, .vector, .matrix => {
                 const elem_ty = result_ty.childType(zcu);
                 if (isByRef(result_ty, zcu, cg.target)) {
                     const result = try cg.allocStack(result_ty);

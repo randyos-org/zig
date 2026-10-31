@@ -60,7 +60,7 @@ pub fn classifyTypeForLlvm(ty: Type, zcu: *const Zcu) LlvmClass {
         },
         .bool => return .{ .direct = ty },
         .vector => return .{ .direct = ty },
-        .array => return .indirect,
+        .array, .matrix => return .indirect,
         .optional => {
             assert(ty.isPtrLikeOptional(zcu));
             return .{ .direct = ty };

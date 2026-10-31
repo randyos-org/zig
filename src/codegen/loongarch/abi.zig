@@ -90,7 +90,7 @@ const Classifier = struct {
                 return .address;
             },
             .pointer, .optional => return .gar,
-            .array => {
+            .array, .matrix => {
                 var class: Class = .ignored;
                 const elem_ty = ty.childType(c.zcu);
                 const elem_class = c.classifyType(elem_ty);

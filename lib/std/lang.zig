@@ -671,6 +671,7 @@ pub const Type = union(enum) {
     vector: Vector,
     enum_literal,
     spirv: Spirv,
+    matrix: Matrix,
 
     /// This data structure is used by the Zig language code generation and
     /// therefore must be kept in sync with the compiler implementation.
@@ -949,6 +950,14 @@ pub const Type = union(enum) {
     /// therefore must be kept in sync with the compiler implementation.
     pub const Vector = struct {
         len: comptime_int,
+        child: type,
+    };
+
+    /// This data structure is used by the Zig language code generation and
+    /// therefore must be kept in sync with the compiler implementation.
+    pub const Matrix = struct {
+        rows: comptime_int,
+        cols: comptime_int,
         child: type,
     };
 };

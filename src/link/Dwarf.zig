@@ -3061,6 +3061,7 @@ fn updateComptimeNavInner(dwarf: *Dwarf, pt: Zcu.PerThread, nav_index: InternPoo
         .ptr_type,
         .array_type,
         .vector_type,
+        .matrix_type,
         .opt_type,
         .error_union_type,
         .anyframe_type,
@@ -3635,6 +3636,15 @@ fn updateConstInner(dwarf: *Dwarf, pt: Zcu.PerThread, debug_const_index: link.Co
             try wip_nav.abbrevCode(.array_len);
             try wip_nav.refType(.usize);
             try diw.writeUleb128(vector_type.len);
+            try diw.writeUleb128(@backingInt(AbbrevCode.null));
+        },
+        .matrix_type => |matrix_type| {
+            try wip_nav.abbrevCode(.array_type);
+            try wip_nav.strpFmt("{f}", .{val.toType().fmt(zcu)});
+            try wip_nav.refType(.fromInterned(matrix_type.column));
+            try wip_nav.abbrevCode(.array_len);
+            try wip_nav.refType(.usize);
+            try diw.writeUleb128(matrix_type.cols);
             try diw.writeUleb128(@backingInt(AbbrevCode.null));
         },
         .opt_type => |opt_child_type_index| {
@@ -4598,6 +4608,27 @@ fn updateConstInner(dwarf: *Dwarf, pt: Zcu.PerThread, debug_const_index: link.Co
                 },
                 inline .array_type, .vector_type => |sequence_type| {
                     const child_type: Type = .fromInterned(sequence_type.child);
+                    const has_runtime_bits = child_type.hasRuntimeBits(zcu);
+                    const has_comptime_state = child_type.comptimeOnly(zcu);
+                    for (switch (aggregate.storage) {
+                        .bytes => unreachable,
+                        .elems => |elems| elems,
+                        .repeated_elem => |*repeated_elem| repeated_elem[0..1],
+                    }) |elem| {
+                        try wip_nav.abbrevCode(if (has_comptime_state)
+                            .comptime_value_elem_comptime_state
+                        else if (has_runtime_bits)
+                            .comptime_value_elem_runtime_bits
+                        else
+                            break);
+                        if (has_comptime_state)
+                            try wip_nav.refValue(.fromInterned(elem))
+                        else
+                            try wip_nav.blockValue(.fromInterned(elem));
+                    }
+                },
+                .matrix_type => |matrix_type| {
+                    const child_type: Type = .fromInterned(matrix_type.column);
                     const has_runtime_bits = child_type.hasRuntimeBits(zcu);
                     const has_comptime_state = child_type.comptimeOnly(zcu);
                     for (switch (aggregate.storage) {

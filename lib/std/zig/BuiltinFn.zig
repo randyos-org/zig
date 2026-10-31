@@ -123,6 +123,7 @@ pub const Tag = enum {
     TypeOf,
     union_init,
     Vector,
+    Matrix,
     volatile_cast,
     work_item_id,
     work_group_size,
@@ -1036,6 +1037,13 @@ pub const list = list: {
             .{
                 .tag = .Vector,
                 .param_count = 2,
+            },
+        },
+        .{
+            "@Matrix",
+            .{
+                .tag = .Matrix,
+                .param_count = 3,
             },
         },
         .{

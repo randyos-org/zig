@@ -51,6 +51,7 @@ pub fn print(
         .ptr_type,
         .array_type,
         .vector_type,
+        .matrix_type,
         .opt_type,
         .anyframe_type,
         .error_union_type,
@@ -256,6 +257,7 @@ fn printAggregate(
             if (is_ref) try writer.writeByte('&');
             return writer.writeAll(".{}");
         },
+        .matrix => {},
         else => unreachable,
     }
 

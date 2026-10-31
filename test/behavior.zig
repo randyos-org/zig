@@ -49,6 +49,7 @@ test {
     _ = @import("behavior/ir_block_deps.zig");
     _ = @import("behavior/lower_strlit_to_vector.zig");
     _ = @import("behavior/math.zig");
+    _ = @import("behavior/matrix.zig");
     _ = @import("behavior/maximum_minimum.zig");
     _ = @import("behavior/member_func.zig");
     _ = @import("behavior/memcpy.zig");

@@ -226,7 +226,7 @@ fn checkType(pool: *const ConstPool, ty: Type, zcu: *const Zcu) bool {
         .enum_literal,
         => true,
 
-        .array, .vector => pool.checkType(ty.childType(zcu), zcu),
+        .array, .vector, .matrix => pool.checkType(ty.childType(zcu), zcu),
         .optional => pool.checkType(ty.optionalChild(zcu), zcu),
         .error_union => pool.checkType(ty.errorUnionPayload(zcu), zcu),
         .@"fn" => {
@@ -272,7 +272,7 @@ fn registerTypeDeps(pool: *ConstPool, root: Index, ty: Type, zcu: *const Zcu) Al
         .enum_literal,
         => {},
 
-        .array, .vector => try pool.registerTypeDeps(root, ty.childType(zcu), zcu),
+        .array, .vector, .matrix => try pool.registerTypeDeps(root, ty.childType(zcu), zcu),
         .optional => try pool.registerTypeDeps(root, ty.optionalChild(zcu), zcu),
         .error_union => try pool.registerTypeDeps(root, ty.errorUnionPayload(zcu), zcu),
         .@"fn" => {

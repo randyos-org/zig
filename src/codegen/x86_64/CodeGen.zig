@@ -170937,6 +170937,18 @@ fn genBody(cg: *CodeGen, body: []const Air.Inst.Index) InnerError!void {
                             try sentinel.die(cg);
                         }
                     },
+                    .matrix_type => |matrix_type| {
+                        const elems: []const Air.Inst.Ref = @ptrCast(cg.air.extra.items[ty_pl.payload..][0..matrix_type.cols]);
+                        const elem_size = Type.fromInterned(matrix_type.column).abiSize(zcu);
+                        var elem_disp: u31 = 0;
+                        for (elems) |elem_ref| {
+                            var elem = try cg.tempFromOperand(elem_ref, bt.feed());
+                            try res.write(&elem, .{ .disp = elem_disp }, cg);
+                            try elem.die(cg);
+                            try cg.resetTemps(reset_index);
+                            elem_disp += @intCast(elem_size);
+                        }
+                    },
                     .struct_type => {
                         const loaded_struct = ip.loadStructType(agg_ty.toIntern());
                         const elems: []const Air.Inst.Ref = @ptrCast(cg.air.extra.items[ty_pl.payload..][0..loaded_struct.field_types.len]);

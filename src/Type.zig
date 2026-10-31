@@ -207,6 +207,11 @@ pub fn classify(start_ty: Type, zcu: *const Zcu) Class {
             cur_ty = .fromInterned(vec.child);
             continue;
         },
+        .matrix_type => |mat| {
+            if (mat.cols == 0) break .one_possible_value;
+            cur_ty = .fromInterned(mat.column);
+            continue;
+        },
         .opt_type => |child_ty_ip| {
             extra_states = switch (extra_states) {
                 .none => .one,
@@ -350,6 +355,7 @@ pub fn isSelfComparable(ty: Type, zcu: *const Zcu, is_equality_cmp: bool) bool {
 
         .noreturn,
         .array,
+        .matrix,
         .undefined,
         .null,
         .error_union,
@@ -515,6 +521,13 @@ pub fn print(ty: Type, writer: *std.Io.Writer, zcu: *Zcu, ctx: ?*Comparison) std
         .vector_type => |vector_type| {
             try writer.print("@Vector({d}, ", .{vector_type.len});
             try print(Type.fromInterned(vector_type.child), writer, zcu, ctx);
+            try writer.writeAll(")");
+            return;
+        },
+        .matrix_type => |matrix_type| {
+            const column = ip.indexToKey(matrix_type.column).vector_type;
+            try writer.print("@Matrix({d}, {d}, ", .{ column.len, matrix_type.cols });
+            try print(Type.fromInterned(column.child), writer, zcu, ctx);
             try writer.writeAll(")");
             return;
         },
@@ -780,6 +793,7 @@ pub fn hasWellDefinedLayout(ty: Type, zcu: *const Zcu) bool {
         => true,
 
         .vector_type,
+        .matrix_type,
         .error_union_type,
         .error_set_type,
         .inferred_error_set_type,
@@ -960,6 +974,7 @@ pub fn abiAlignment(ty: Type, zcu: *const Zcu) Alignment {
         },
         .ptr_type, .anyframe_type => ptrAbiAlignment(target),
         .array_type => |array_type| Type.fromInterned(array_type.child).abiAlignment(zcu),
+        .matrix_type => |matrix_type| Type.fromInterned(matrix_type.column).abiAlignment(zcu),
         .vector_type => |vector_type| {
             if (vector_type.len == 0) return .@"1";
             switch (zcu.comp.getZigBackend()) {
@@ -1144,6 +1159,7 @@ pub fn abiSize(ty: Type, zcu: *const Zcu) u64 {
         },
         .anyframe_type => ptrAbiSize(target),
         .array_type => |arr| arr.lenIncludingSentinel() * Type.fromInterned(arr.child).abiSize(zcu),
+        .matrix_type => |mat| mat.cols * Type.fromInterned(mat.column).abiSize(zcu),
         .vector_type => |vec| {
             const elem_ty: Type = .fromInterned(vec.child);
             const bytes = switch (zcu.comp.getZigBackend()) {
@@ -1324,7 +1340,7 @@ pub fn bitSize(ty: Type, zcu: *const Zcu) u64 {
             assert(ty.isPtrAtRuntime(zcu));
             return zcu.getTarget().ptrBitWidth();
         },
-        .array, .vector => ty.arrayLenIncludingSentinel(zcu) * ty.childType(zcu).bitSize(zcu),
+        .array, .vector, .matrix => ty.arrayLenIncludingSentinel(zcu) * ty.childType(zcu).bitSize(zcu),
         else => ty.intInfo(zcu).bits,
     };
 }
@@ -1508,15 +1524,19 @@ pub fn nullablePtrElem(ty: Type, zcu: *const Zcu) Type {
 /// * `[*c]T`
 /// * `@SpirvType(.{ .runtime_array = T })`
 /// * `*@SpirvType(.{ .runtime_array = T })`
+///
+/// Returns `@Vector(rows, T)` for `@Matrix(rows, cols, T)` and `*@Matrix(rows, cols, T)`.
 pub fn indexableElem(ty: Type, zcu: *const Zcu) Type {
     const ip = &zcu.intern_pool;
     return switch (ip.indexToKey(ty.toIntern())) {
         inline .array_type, .vector_type => |arr| .fromInterned(arr.child),
+        .matrix_type => |mat| .fromInterned(mat.column),
         .spirv_type => ty.childType(zcu),
         .ptr_type => |ptr_type| switch (ptr_type.flags.size) {
             .many, .slice, .c => .fromInterned(ptr_type.child),
             .one => switch (ip.indexToKey(ptr_type.child)) {
                 inline .array_type, .vector_type => |arr| .fromInterned(arr.child),
+                .matrix_type => |mat| .fromInterned(mat.column),
                 .spirv_type => Type.fromInterned(ptr_type.child).childType(zcu),
                 else => unreachable,
             },
@@ -1525,10 +1545,11 @@ pub fn indexableElem(ty: Type, zcu: *const Zcu) Type {
     };
 }
 
-/// For vectors, returns the element type. Otherwise returns self.
+/// For vectors and matrices, returns the element type. Otherwise returns self.
 pub fn scalarType(ty: Type, zcu: *const Zcu) Type {
     return switch (ty.zigTypeTag(zcu)) {
         .vector => ty.childType(zcu),
+        .matrix => ty.childType(zcu).childType(zcu),
         else => ty,
     };
 }
@@ -1774,6 +1795,7 @@ pub fn vectorLen(ty: Type, zcu: *const Zcu) u32 {
 pub fn sentinel(ty: Type, zcu: *const Zcu) ?Value {
     return switch (zcu.intern_pool.indexToKey(ty.toIntern())) {
         .vector_type,
+        .matrix_type,
         .struct_type,
         .tuple_type,
         => null,
@@ -1870,6 +1892,7 @@ pub fn intInfo(starting_ty: Type, zcu: *const Zcu) InternPool.Key.IntType {
             .ptr_type => unreachable,
             .anyframe_type => unreachable,
             .array_type => unreachable,
+            .matrix_type => unreachable,
 
             .opt_type => unreachable,
             .error_union_type => unreachable,
@@ -2095,6 +2118,15 @@ pub fn onePossibleValue(ty: Type, pt: Zcu.PerThread) !?Value {
                 return try pt.aggregateValue(ty, &.{});
             }
             if (try Type.fromInterned(seq_type.child).onePossibleValue(pt)) |opv| {
+                return try pt.aggregateSplatValue(ty, opv);
+            }
+            return null;
+        },
+        .matrix_type => |mat| {
+            if (mat.cols == 0) {
+                return try pt.aggregateValue(ty, &.{});
+            }
+            if (try Type.fromInterned(mat.column).onePossibleValue(pt)) |opv| {
                 return try pt.aggregateSplatValue(ty, opv);
             }
             return null;
@@ -2811,6 +2843,7 @@ pub fn elemPtrType(ptr_ty: Type, index: ?u64, pt: Zcu.PerThread) Allocator.Error
         .slice, .many, .c => .fromInterned(ptr_info.child),
         .one => switch (ip.indexToKey(ptr_info.child)) {
             .array_type => |array_type| .fromInterned(array_type.child),
+            .matrix_type => |matrix_type| .fromInterned(matrix_type.column),
             .spirv_type => Type.fromInterned(ptr_info.child).childType(zcu),
             else => unreachable,
         },
@@ -3077,6 +3110,7 @@ pub fn unpackable(ty: Type, zcu: *const Zcu) ?UnpackableReason {
         .@"fn",
         .array,
         .vector,
+        .matrix,
         => .other,
 
         .optional => if (ty.isPtrLikeOptional(zcu))
@@ -3138,6 +3172,7 @@ pub fn validateExtern(ty: Type, position: ExternPosition, zcu: *const Zcu) bool 
             if (zcu.getTarget().cpu.arch.isSpirv()) return true;
             return position == .param_ty or position == .ret_ty;
         },
+        .matrix => zcu.getTarget().cpu.arch.isSpirv(),
 
         .void => switch (position) {
             .ret_ty,
@@ -3274,7 +3309,7 @@ pub fn hasBitRepresentation(ty: Type, zcu: *const Zcu) bool {
         .pointer, .optional => ty.isPtrAtRuntime(zcu),
         .@"struct", .@"union" => ty.containerLayout(zcu) == .@"packed",
 
-        .array, .vector => ty.childType(zcu).hasBitRepresentation(zcu),
+        .array, .vector, .matrix => ty.childType(zcu).hasBitRepresentation(zcu),
     };
 }
 
@@ -3304,6 +3339,7 @@ pub fn assertHasLayout(ty: Type, zcu: *const Zcu) void {
         },
         .array_type => |arr| assertHasLayout(.fromInterned(arr.child), zcu),
         .vector_type => |vec| assertHasLayout(.fromInterned(vec.child), zcu),
+        .matrix_type => |mat| assertHasLayout(.fromInterned(mat.column), zcu),
         .opt_type => |child| assertHasLayout(.fromInterned(child), zcu),
         .error_union_type => |eu| assertHasLayout(.fromInterned(eu.payload_type), zcu),
         .tuple_type => |tuple| for (tuple.types.get(&zcu.intern_pool)) |field_ty| {
@@ -3360,6 +3396,7 @@ fn collectSubtypes(ty: Type, zcu: *Zcu, visited: *std.array_hash_map.Auto(Type, 
         .ptr_type => try collectSubtypes(Type.fromInterned(ty.ptrInfo(zcu).child), zcu, visited),
         .array_type => |array_type| try collectSubtypes(Type.fromInterned(array_type.child), zcu, visited),
         .vector_type => |vector_type| try collectSubtypes(Type.fromInterned(vector_type.child), zcu, visited),
+        .matrix_type => |matrix_type| try collectSubtypes(Type.fromInterned(matrix_type.column), zcu, visited),
         .opt_type => |child| try collectSubtypes(Type.fromInterned(child), zcu, visited),
         .error_union_type => |error_union_type| {
             try collectSubtypes(Type.fromInterned(error_union_type.error_set_type), zcu, visited);

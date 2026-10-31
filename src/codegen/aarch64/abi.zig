@@ -70,6 +70,7 @@ pub fn classifyType(ty: Type, zcu: *Zcu) Class {
         .spirv,
         .enum_literal,
         .array,
+        .matrix,
         => unreachable,
     }
 }

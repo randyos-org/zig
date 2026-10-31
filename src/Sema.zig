@@ -1424,6 +1424,7 @@ fn analyzeBodyInner(
                     .reify_union               => try sema.zirReifyUnion(           block, extended, inst),
                     .reify_enum                => try sema.zirReifyEnum(            block, extended, inst),
                     .reify_spirv_type          => try sema.zirReifySpirvType(       block, extended, inst),
+                    .matrix_type               => try sema.zirMatrixType(           block, extended),
                     // zig fmt: on
 
                     .set_float_mode => {
@@ -7549,6 +7550,31 @@ fn zirVectorType(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!
     return Air.internedToRef(vector_type.toIntern());
 }
 
+fn zirMatrixType(sema: *Sema, block: *Block, extended: Zir.Inst.Extended.InstData) CompileError!Air.Inst.Ref {
+    const zcu = sema.pt.zcu;
+    const extra = sema.code.extraData(Zir.Inst.MatrixType, extended.operand).data;
+    const rows_src = block.builtinCallArgSrc(extra.node, 0);
+    const cols_src = block.builtinCallArgSrc(extra.node, 1);
+    const elem_type_src = block.builtinCallArgSrc(extra.node, 2);
+    const rows: u32 = @intCast(try sema.resolveInt(block, rows_src, extra.rows, .u32, .{ .simple = .matrix_rows }));
+    const cols: u32 = @intCast(try sema.resolveInt(block, cols_src, extra.cols, .u32, .{ .simple = .matrix_cols }));
+    const elem_type = try sema.resolveType(block, elem_type_src, extra.elem_type);
+    if (rows == 0) return sema.fail(block, rows_src, "matrix must have at least one row", .{});
+    if (cols == 0) return sema.fail(block, cols_src, "matrix must have at least one column", .{});
+    if (!elem_type.isRuntimeFloat()) {
+        return sema.fail(block, elem_type_src, "expected float for the matrix element type; found '{f}'", .{elem_type.fmt(zcu)});
+    }
+    const column_type = try sema.pt.vectorType(.{
+        .len = rows,
+        .child = elem_type.toIntern(),
+    });
+    const matrix_type = try sema.pt.matrixType(.{
+        .cols = cols,
+        .column = column_type.toIntern(),
+    });
+    return Air.internedToRef(matrix_type.toIntern());
+}
+
 fn zirArrayType(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air.Inst.Ref {
     const inst_data = sema.code.instructions.items(.data)[@backingInt(inst)].pl_node;
     const extra = sema.code.extraData(Zir.Inst.Bin, inst_data.payload_index).data;
@@ -11285,6 +11311,7 @@ fn validateSwitchBlock(
             .comptime_float,
             .array,
             .vector,
+            .matrix,
             .undefined,
             .null,
             .@"opaque",
@@ -15432,7 +15459,7 @@ fn zirAsm(
             }
         };
         switch (out_ty.zigTypeTag(zcu)) {
-            .int, .float, .bool, .vector => {},
+            .int, .float, .bool, .vector, .matrix => {},
 
             .pointer => if (out_ty.isSlice(zcu)) return sema.failWithOwnedErrorMsg(block, msg: {
                 const msg = try sema.errMsg(output_src, "invalid inline assembly output type '{f}'", .{out_ty.fmt(zcu)});
@@ -16460,6 +16487,24 @@ fn zirTypeInfo(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Ai
                 .ty = type_info_ty.toIntern(),
                 .tag = (try pt.enumValueFieldIndex(type_info_tag_ty, @backingInt(std.lang.TypeId.vector))).toIntern(),
                 .val = (try pt.aggregateValue(vector_field_ty, &field_values)).toIntern(),
+            })));
+        },
+        .matrix => {
+            const matrix_field_ty = try sema.getStdLangType(src, .@"Type.Matrix");
+
+            const column_ty = ty.childType(zcu);
+            const field_values = .{
+                // rows: comptime_int,
+                (try pt.intValue(.comptime_int, column_ty.vectorLen(zcu))).toIntern(),
+                // cols: comptime_int,
+                (try pt.intValue(.comptime_int, ty.arrayLen(zcu))).toIntern(),
+                // child: type,
+                column_ty.childType(zcu).toIntern(),
+            };
+            return Air.internedToRef((try pt.internUnion(.{
+                .ty = type_info_ty.toIntern(),
+                .tag = (try pt.enumValueFieldIndex(type_info_tag_ty, @backingInt(std.lang.TypeId.matrix))).toIntern(),
+                .val = (try pt.aggregateValue(matrix_field_ty, &field_values)).toIntern(),
             })));
         },
         .optional => {
@@ -25751,6 +25796,7 @@ fn explainWhyTypeIsComptime(
         .@"enum",
         .@"opaque",
         .spirv,
+        .matrix,
         .pointer,
         => unreachable, // not comptime-only
 
@@ -25926,6 +25972,7 @@ pub fn explainWhyTypeIsNotExtern(
             else => try sema.explainWhyTypeIsNotExtern(msg, src_loc, ty.childType(zcu), .element),
         },
         .vector => try sema.errNote(src_loc, msg, "vectors have no guaranteed in-memory representation", .{}),
+        .matrix => try sema.errNote(src_loc, msg, "matrices have no guaranteed in-memory representation", .{}),
         .optional => try sema.errNote(src_loc, msg, "non-pointer optionals have no guaranteed in-memory representation", .{}),
     }
 }
@@ -28757,7 +28804,7 @@ fn coerceExtra(
 
                 return sema.coerceArrayLike(block, dest_ty, dest_ty_src, inst, inst_src);
             },
-            .vector => return sema.coerceArrayLike(block, dest_ty, dest_ty_src, inst, inst_src),
+            .vector, .matrix => return sema.coerceArrayLike(block, dest_ty, dest_ty_src, inst, inst_src),
             .@"struct" => {
                 if (inst_ty.isTuple(zcu)) {
                     return sema.coerceTupleToArray(block, dest_ty, dest_ty_src, inst, inst_src);
@@ -28767,6 +28814,15 @@ fn coerceExtra(
         },
         .vector => switch (inst_ty.zigTypeTag(zcu)) {
             .array, .vector => return sema.coerceArrayLike(block, dest_ty, dest_ty_src, inst, inst_src),
+            .@"struct" => {
+                if (inst_ty.isTuple(zcu)) {
+                    return sema.coerceTupleToArray(block, dest_ty, dest_ty_src, inst, inst_src);
+                }
+            },
+            else => {},
+        },
+        .matrix => switch (inst_ty.zigTypeTag(zcu)) {
+            .array => return sema.coerceArrayLike(block, dest_ty, dest_ty_src, inst, inst_src),
             .@"struct" => {
                 if (inst_ty.isTuple(zcu)) {
                     return sema.coerceTupleToArray(block, dest_ty, dest_ty_src, inst, inst_src);
@@ -32768,7 +32824,7 @@ const PeerResolveStrategy = enum {
 
     fn select(ty: Type, zcu: *Zcu) PeerResolveStrategy {
         return switch (ty.zigTypeTag(zcu)) {
-            .type, .void, .bool, .@"opaque", .spirv, .frame, .@"anyframe" => .exact,
+            .type, .void, .bool, .@"opaque", .spirv, .matrix, .frame, .@"anyframe" => .exact,
             .noreturn, .undefined => .unknown,
             .null => .nullable,
             .comptime_int => .comptime_int,
@@ -35453,6 +35509,7 @@ fn getExpectedBuiltinFnType(sema: *Sema, decl: Zcu.StdLangDecl) CompileError!Typ
         .@"Type.Pointer.Attributes",
         .@"Type.Array",
         .@"Type.Vector",
+        .@"Type.Matrix",
         .@"Type.Optional",
         .@"Type.ErrorUnion",
         .@"Type.ErrorSet",

@@ -701,7 +701,7 @@ pub fn layoutType(cg: *CodeGen, ty: Type, is_block_root: bool) Error!Id {
             });
             break :id id;
         },
-        .array => id: {
+        .array, .matrix => id: {
             const elem_ty = ty.childType(zcu);
             const elem_ty_id = try cg.layoutType(elem_ty, is_block_root);
             const total_len = std.math.cast(u32, ty.arrayLenIncludingSentinel(zcu)) orelse
@@ -850,7 +850,7 @@ fn decorateLayout(cg: *CodeGen, ty: Type, ty_id: spec.Id) Error!void {
     const zcu = cg.zcu;
     const ip = &zcu.intern_pool;
     switch (ty.zigTypeTag(zcu)) {
-        .array => {
+        .array, .matrix => {
             const elem_ty = ty.childType(zcu);
             if (!elem_ty.hasRuntimeBits(zcu)) return;
             try cg.decorate(ty_id, .{
@@ -1295,6 +1295,7 @@ fn constant(cg: *CodeGen, ty: Type, val: Value, repr: Repr) Error!Id {
         .ptr_type,
         .array_type,
         .vector_type,
+        .matrix_type,
         .opt_type,
         .anyframe_type,
         .error_union_type,
@@ -1449,6 +1450,28 @@ fn constant(cg: *CodeGen, ty: Type, val: Value, repr: Repr) Error!Id {
                     },
                     .repeated_elem => |elem| {
                         @memset(constituents, try cg.constant(elem_ty, .fromInterned(elem), child_repr));
+                    },
+                }
+
+                const comp_ty_id = try cg.resolveType(ty, .direct);
+                return cg.constantComposite(comp_ty_id, constituents);
+            },
+            .matrix_type => |matrix_type| {
+                const elem_ty: Type = .fromInterned(matrix_type.column);
+
+                const scratch_top = cg.id_scratch.items.len;
+                defer cg.id_scratch.shrinkRetainingCapacity(scratch_top);
+                const constituents = try cg.id_scratch.addManyAsSlice(gpa, matrix_type.cols);
+
+                switch (aggregate.storage) {
+                    .bytes => unreachable,
+                    .elems => |elems| {
+                        for (constituents, elems) |*constituent, elem| {
+                            constituent.* = try cg.constant(elem_ty, .fromInterned(elem), .indirect);
+                        }
+                    },
+                    .repeated_elem => |elem| {
+                        @memset(constituents, try cg.constant(elem_ty, .fromInterned(elem), .indirect));
                     },
                 }
 
@@ -1615,7 +1638,7 @@ fn constantBytes(cg: *CodeGen, ty: Type, bytes: []const u8) Error!Id {
             return result_id;
         },
         .@"enum" => return cg.constantBytes(ty.backingIntType(zcu), bytes),
-        .array, .vector => {
+        .array, .vector, .matrix => {
             const elem_ty = ty.childType(zcu);
             const elem_size: usize = @intCast(elem_ty.abiSize(zcu));
             const constituents = try gpa.alloc(Id, @intCast(ty.arrayLenIncludingSentinel(zcu)));
@@ -1999,7 +2022,7 @@ fn resolveType(cg: *CodeGen, ty: Type, repr: Repr) Error!Id {
             );
             return try cg.floatType(bits);
         },
-        .array => {
+        .array, .matrix => {
             const elem_ty = ty.childType(zcu);
             const elem_ty_id = try cg.resolveType(elem_ty, .indirect);
             const total_len = std.math.cast(u32, ty.arrayLenIncludingSentinel(zcu)) orelse {
@@ -3806,7 +3829,7 @@ fn needsLayout(cg: *CodeGen, as: std.lang.AddressSpace, pointee_ty: Type) bool {
         .storage_buffer,
         .physical_storage_buffer,
         => switch (pointee_ty.zigTypeTag(cg.zcu)) {
-            .@"struct", .@"union", .array => true,
+            .@"struct", .@"union", .array, .matrix => true,
             .spirv => pointee_ty.isSpirvRuntimeArray(cg.zcu),
             else => false,
         },
@@ -5585,7 +5608,7 @@ fn bitCast(
             var cur = src_child;
             while (cur.toIntern() != dst_child.toIntern()) : (try indices.append(gpa, 0)) {
                 cur = switch (cur.zigTypeTag(zcu)) {
-                    .array, .vector => cur.childType(zcu),
+                    .array, .vector, .matrix => cur.childType(zcu),
                     .@"struct" => field: {
                         for (0..cur.structFieldCount(zcu)) |i| {
                             const field_ty = cur.fieldType(i, zcu);
@@ -8293,7 +8316,7 @@ fn airAggregateInit(cg: *CodeGen, inst: Air.Inst.Index) !?Id {
             const result_ty_id = try cg.resolveType(result_ty, .direct);
             return try cg.constructComposite(result_ty_id, elem_ids);
         },
-        .array => {
+        .array, .matrix => {
             const array_info = result_ty.arrayInfo(zcu);
             const n_elems: usize = @intCast(result_ty.arrayLenIncludingSentinel(zcu));
             const scratch_top = cg.id_scratch.items.len;

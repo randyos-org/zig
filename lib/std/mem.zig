@@ -372,6 +372,11 @@ pub fn zeroes(comptime T: type) T {
         .vector => |info| {
             return @splat(zeroes(info.child));
         },
+        .matrix => {
+            var item: T = undefined;
+            @memset(asBytes(&item), 0);
+            return item;
+        },
         .@"union" => |info| {
             if (info.layout == .@"extern") {
                 var item: T = undefined;

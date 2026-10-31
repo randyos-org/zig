@@ -114,6 +114,7 @@ pub fn classifyWindows(init_ty: Type, zcu: *Zcu, target: *const std.Target, ctx:
         .@"union",
         .optional,
         .array,
+        .matrix,
         .error_union,
         .@"anyframe",
         .frame,
@@ -336,7 +337,7 @@ pub fn classifySystemV(ty: Type, zcu: *Zcu, target: *const std.Target, ctx: Cont
             };
             return result;
         },
-        .array => {
+        .array, .matrix => {
             const ty_size = ty.abiSize(zcu);
             if (ty_size == 0) return Class.zero_bit;
             if (ty_size <= 8) return Class.one_integer;

@@ -3957,6 +3957,10 @@ pub fn vectorType(pt: Zcu.PerThread, info: InternPool.Key.VectorType) Allocator.
     return .fromInterned(try pt.intern(.{ .vector_type = info }));
 }
 
+pub fn matrixType(pt: Zcu.PerThread, info: InternPool.Key.MatrixType) Allocator.Error!Type {
+    return .fromInterned(try pt.intern(.{ .matrix_type = info }));
+}
+
 pub fn optionalType(pt: Zcu.PerThread, child_type: InternPool.Index) Allocator.Error!Type {
     return .fromInterned(try pt.intern(.{ .opt_type = child_type }));
 }
@@ -4213,7 +4217,7 @@ pub fn aggregateValue(pt: Zcu.PerThread, ty: Type, elems: []const InternPool.Ind
 /// Asserts that `ty` is either an array or a vector.
 pub fn aggregateSplatValue(pt: Zcu.PerThread, ty: Type, repeated_elem: Value) Allocator.Error!Value {
     switch (ty.zigTypeTag(pt.zcu)) {
-        .array, .vector => {},
+        .array, .vector, .matrix => {},
         else => unreachable,
     }
     if (repeated_elem.isUndef(pt.zcu)) return pt.undefValue(ty);

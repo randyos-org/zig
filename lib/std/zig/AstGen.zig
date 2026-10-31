@@ -9706,6 +9706,15 @@ fn builtinCall(
             });
             return rvalue(gz, ri, result, node);
         },
+        .Matrix => {
+            const result = try gz.addExtendedPayload(.matrix_type, Zir.Inst.MatrixType{
+                .node = gz.nodeIndexToRelative(node),
+                .rows = try comptimeExpr(gz, scope, .{ .rl = .{ .coerced_ty = .u32_type } }, params[0], .type),
+                .cols = try comptimeExpr(gz, scope, .{ .rl = .{ .coerced_ty = .u32_type } }, params[1], .type),
+                .elem_type = try typeExpr(gz, scope, params[2]),
+            });
+            return rvalue(gz, ri, result, node);
+        },
         .prefetch => {
             const prefetch_options_ty = try gz.addStdLangValue(node, .prefetch_options);
             const ptr = try expr(gz, scope, .{ .rl = .none }, params[0]);

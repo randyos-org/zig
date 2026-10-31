@@ -345,6 +345,7 @@ pub fn generateSymbol(
         .ptr_type,
         .array_type,
         .vector_type,
+        .matrix_type,
         .opt_type,
         .anyframe_type,
         .error_union_type,
@@ -561,6 +562,19 @@ pub fn generateSymbol(
                     const padding = abi_size - @as(usize, @intCast(Type.fromInterned(vector_type.child).abiSize(zcu) * vector_type.len));
                     if (padding > 0) try w.splatByteAll(0, padding);
                 }
+            },
+            .matrix_type => |matrix_type| switch (aggregate.storage) {
+                .bytes => unreachable,
+                .elems, .repeated_elem => {
+                    var index: u64 = 0;
+                    while (index < matrix_type.cols) : (index += 1) {
+                        try generateSymbol(bin_file, pt, Value.fromInterned(switch (aggregate.storage) {
+                            .bytes => unreachable,
+                            .elems => |elems| elems[@intCast(index)],
+                            .repeated_elem => |elem| elem,
+                        }), w, reloc_parent);
+                    }
+                },
             },
             .tuple_type => |tuple| {
                 const struct_begin = w.end;
@@ -1077,6 +1091,26 @@ pub fn flattenType(items_buf: []FlattenedItem, ty: Type, zcu: *Zcu, opts: struct
             const len = array_type.lenIncludingSentinel();
             if (len == 0) return items_buf[0..0];
             const elem_ty: Type = .fromInterned(array_type.child);
+            const elem_items = flattenType(items_buf, elem_ty, zcu, opts) orelse return null;
+            if (elem_items.len == 0) return items_buf[0..0];
+            if (!opts.allow_arrays) return null;
+            const items_len, const items_overflow = @mulWithOverflow(elem_items.len, len);
+            if (items_overflow != 0 or items_buf.len < items_len) return null;
+            var items_index = elem_items.len;
+            const elem_size = elem_ty.abiSize(zcu);
+            var elem_offset: u64 = elem_size;
+            while (items_index != items_len) : ({
+                items_index += elem_items.len;
+                elem_offset += elem_size;
+            }) for (items_buf[items_index..][0..elem_items.len], elem_items) |*item, elem_item| {
+                item.* = .{ .offset = elem_offset + elem_item.offset, .type = elem_item.type };
+            };
+            return items_buf[0..@intCast(items_len)];
+        },
+        .matrix_type => |matrix_type| {
+            const len = matrix_type.cols;
+            if (len == 0) return items_buf[0..0];
+            const elem_ty: Type = .fromInterned(matrix_type.column);
             const elem_items = flattenType(items_buf, elem_ty, zcu, opts) orelse return null;
             if (elem_items.len == 0) return items_buf[0..0];
             if (!opts.allow_arrays) return null;

@@ -134,7 +134,7 @@ pub fn fwdDecl(ty: Type, w: *Writer, zcu: *const Zcu) Writer.Error!void {
         },
         .pointer => if (ty.isSlice(zcu)) .{ .slice = ty } else return,
         .optional => .{ .opt = ty },
-        .array => .{ .arr = ty },
+        .array, .matrix => .{ .arr = ty },
         .vector => .{ .vec = ty },
         else => return,
     };
@@ -300,7 +300,7 @@ pub fn defineComplete(
                 break :check_cty name_cty;
             },
         },
-        .array => if (ty.hasRuntimeBits(zcu)) {
+        .array, .matrix => if (ty.hasRuntimeBits(zcu)) {
             const name_cty: CType = .{ .arr = ty };
             const elem_cty: CType = try .lower(ty.childType(zcu), deps, arena, zcu);
             const array_cty: CType = .{ .array = .{

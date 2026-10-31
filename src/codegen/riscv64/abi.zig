@@ -98,6 +98,7 @@ pub fn classifyType(ty: Type, zcu: *Zcu) Class {
         .spirv,
         .enum_literal,
         .array,
+        .matrix,
         => unreachable,
     }
 }
@@ -183,7 +184,7 @@ pub fn classifySystem(ty: Type, zcu: *Zcu) [8]SystemClass {
 
             return memory_class;
         },
-        .array => {
+        .array, .matrix => {
             const ty_size = ty.abiSize(zcu);
             if (ty_size <= 8) {
                 result[0] = .integer;

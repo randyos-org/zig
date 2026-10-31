@@ -464,7 +464,7 @@ pub const CType = union(enum) {
                     try deps.addType(gpa, cur_ty, allow_incomplete);
                     return .{ .vec = cur_ty };
                 },
-                .array => {
+                .array, .matrix => {
                     try deps.addType(gpa, cur_ty, allow_incomplete);
                     return .{ .arr = cur_ty };
                 },
@@ -1136,6 +1136,11 @@ pub const CType = union(enum) {
                     fmtZigType(ty.childType(zcu), zcu),
                 }),
 
+                .matrix => try w.print("mat_{d}_{f}", .{
+                    ty.arrayLen(zcu),
+                    fmtZigType(ty.childType(zcu), zcu),
+                }),
+
                 .array => if (ty.sentinel(zcu)) |s| try w.print("arr_{d}s{d}_{f}", .{
                     ty.arrayLen(zcu),
                     @backingInt(s.toIntern()),
@@ -1191,6 +1196,7 @@ pub const CType = union(enum) {
 
             .array_type => |arr| alwaysHasLayout(.fromInterned(arr.child), ip),
             .vector_type => |vec| alwaysHasLayout(.fromInterned(vec.child), ip),
+            .matrix_type => |mat| alwaysHasLayout(.fromInterned(mat.column), ip),
             .opt_type => |child| alwaysHasLayout(.fromInterned(child), ip),
             .error_union_type => |eu| alwaysHasLayout(.fromInterned(eu.payload_type), ip),
 

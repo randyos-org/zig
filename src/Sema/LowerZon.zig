@@ -243,6 +243,7 @@ fn checkTypeInner(
         .@"anyframe",
         .@"opaque",
         .spirv,
+        .matrix,
         => return self.failUnsupportedResultType(ty, null),
 
         .pointer => {
@@ -410,6 +411,7 @@ fn lowerExprKnownResTyInner(
         .@"fn",
         .@"opaque",
         .spirv,
+        .matrix,
         .frame,
         .@"anyframe",
         .void,

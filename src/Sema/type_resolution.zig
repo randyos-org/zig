@@ -105,6 +105,7 @@ fn ensureLayoutResolvedInner(sema: *Sema, ty: Type, orig_ty: Type, reason: *cons
 
         .array_type => |arr| return ensureLayoutResolvedInner(sema, .fromInterned(arr.child), orig_ty, reason),
         .vector_type => |vec| return ensureLayoutResolvedInner(sema, .fromInterned(vec.child), orig_ty, reason),
+        .matrix_type => |mat| return ensureLayoutResolvedInner(sema, .fromInterned(mat.column), orig_ty, reason),
         .opt_type => |child| return ensureLayoutResolvedInner(sema, .fromInterned(child), orig_ty, reason),
         .error_union_type => |eu| return ensureLayoutResolvedInner(sema, .fromInterned(eu.payload_type), orig_ty, reason),
         .tuple_type => |tuple| for (tuple.types.get(ip)) |field_ty| {

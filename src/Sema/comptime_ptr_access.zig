@@ -482,6 +482,7 @@ fn loadComptimePtrInner(
             .frame,
             .@"enum",
             .vector,
+            .matrix,
             => break, // terminal types (no sub-values)
             .optional => break, // this can only be a pointer-like optional so is terminal
             .array => {
@@ -901,6 +902,7 @@ fn prepareComptimePtrStore(
             .frame,
             .@"enum",
             .vector,
+            .matrix,
             => break, // terminal types (no sub-values)
             .optional => break, // this can only be a pointer-like optional so is terminal
             .array => {

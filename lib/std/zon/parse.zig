@@ -1267,6 +1267,7 @@ fn canParseTypeInner(
         .@"anyframe",
         .@"opaque",
         .spirv,
+        .matrix,
         .comptime_int,
         .comptime_float,
         .enum_literal,
