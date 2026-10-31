@@ -888,6 +888,7 @@ fn builtinCall(astrl: *AstRlAnnotate, block: ?*Block, ri: ResultInfo, node: Ast.
         .set_eval_branch_quota,
         .int_from_bool,
         .int_from_error,
+        .transpose,
         .error_from_int,
         .from_backing_int,
         .embed_file,

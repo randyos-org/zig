@@ -1425,6 +1425,7 @@ fn analyzeBodyInner(
                     .reify_enum                => try sema.zirReifyEnum(            block, extended, inst),
                     .reify_spirv_type          => try sema.zirReifySpirvType(       block, extended, inst),
                     .matrix_type               => try sema.zirMatrixType(           block, extended),
+                    .transpose                 => try sema.zirTranspose(            block, extended),
                     // zig fmt: on
 
                     .set_float_mode => {
@@ -13998,6 +13999,8 @@ fn zirNegate(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air.
     const rhs_ty = sema.typeOf(rhs);
     const rhs_scalar_ty = rhs_ty.scalarType(zcu);
 
+    if (rhs_ty.zigTypeTag(zcu) == .matrix) return sema.negateMatrix(block, src, rhs);
+
     if (rhs_scalar_ty.isUnsignedInt(zcu) or switch (rhs_scalar_ty.zigTypeTag(zcu)) {
         .int, .comptime_int, .float, .comptime_float => false,
         else => true,
@@ -15127,6 +15130,9 @@ fn analyzeArithmetic(
     const rhs_ty = sema.typeOf(rhs);
     const lhs_zig_ty_tag = lhs_ty.zigTypeTag(zcu);
     const rhs_zig_ty_tag = rhs_ty.zigTypeTag(zcu);
+    if (lhs_zig_ty_tag == .matrix or rhs_zig_ty_tag == .matrix) {
+        return sema.analyzeMatrixArithmetic(block, zir_tag, lhs, rhs, src, lhs_src, rhs_src, want_safety);
+    }
     try sema.checkVectorizableBinaryOperands(block, src, lhs_ty, rhs_ty, lhs_src, rhs_src);
 
     if (lhs_zig_ty_tag == .pointer) {
@@ -15313,6 +15319,254 @@ fn analyzeArithmetic(
 }
 
 /// Asserts that the layout of the pointer child type is already resolved.
+/// Matrix operators. `+` and `-` work column by column. `*` is the matrix
+/// product of a matrix and a matrix, a vector or a scalar, or of a vector (as
+/// a row) and a matrix. Products sum in column order, unfused, unless the
+/// float mode is optimized.
+fn analyzeMatrixArithmetic(
+    sema: *Sema,
+    block: *Block,
+    zir_tag: Zir.Inst.Tag,
+    lhs: Air.Inst.Ref,
+    rhs: Air.Inst.Ref,
+    src: LazySrcLoc,
+    lhs_src: LazySrcLoc,
+    rhs_src: LazySrcLoc,
+    want_safety: bool,
+) CompileError!Air.Inst.Ref {
+    const pt = sema.pt;
+    const zcu = pt.zcu;
+    const lhs_ty = sema.typeOf(lhs);
+    const rhs_ty = sema.typeOf(rhs);
+    const lhs_tag = lhs_ty.zigTypeTag(zcu);
+    const rhs_tag = rhs_ty.zigTypeTag(zcu);
+
+    switch (zir_tag) {
+        .add, .sub => {
+            const matrix_ty = if (lhs_tag == .matrix) lhs_ty else rhs_ty;
+            const lhs_matrix = try sema.coerce(block, matrix_ty, lhs, lhs_src);
+            const rhs_matrix = try sema.coerce(block, matrix_ty, rhs, rhs_src);
+            const cols = try sema.arena.alloc(Air.Inst.Ref, @intCast(matrix_ty.arrayLen(zcu)));
+            for (cols, 0..) |*col, j| col.* = try sema.analyzeArithmetic(
+                block,
+                zir_tag,
+                try sema.matrixColumn(block, src, lhs_matrix, j),
+                try sema.matrixColumn(block, src, rhs_matrix, j),
+                src,
+                lhs_src,
+                rhs_src,
+                want_safety,
+            );
+            return sema.aggregateFromElems(block, src, matrix_ty, cols);
+        },
+        .mul => {},
+        else => return sema.fail(block, src, "matrices support only the '+', '-' and '*' operators", .{}),
+    }
+
+    const bad_shapes = "cannot multiply '{f}' by '{f}'";
+    if (lhs_tag == .matrix and rhs_tag == .matrix) {
+        if (rhs_ty.childType(zcu).vectorLen(zcu) != lhs_ty.arrayLen(zcu) or
+            rhs_ty.scalarType(zcu).toIntern() != lhs_ty.scalarType(zcu).toIntern())
+        {
+            return sema.fail(block, src, bad_shapes, .{ lhs_ty.fmt(zcu), rhs_ty.fmt(zcu) });
+        }
+        const result_ty = try pt.matrixType(.{
+            .cols = @intCast(rhs_ty.arrayLen(zcu)),
+            .column = lhs_ty.childType(zcu).toIntern(),
+        });
+        if (sema.isNativeSpirvMatrix(lhs_ty) and sema.isNativeSpirvMatrix(rhs_ty) and sema.isNativeSpirvMatrix(result_ty)) {
+            if (try sema.addMatrixMul(block, src, result_ty, lhs, rhs)) |result| return result;
+        }
+        const cols = try sema.arena.alloc(Air.Inst.Ref, @intCast(result_ty.arrayLen(zcu)));
+        for (cols, 0..) |*col, j| {
+            col.* = try sema.matrixTimesVector(block, src, lhs, try sema.matrixColumn(block, src, rhs, j));
+        }
+        return sema.aggregateFromElems(block, src, result_ty, cols);
+    }
+    if (lhs_tag == .matrix and rhs_tag == .vector) {
+        if (rhs_ty.vectorLen(zcu) != lhs_ty.arrayLen(zcu) or
+            rhs_ty.childType(zcu).toIntern() != lhs_ty.scalarType(zcu).toIntern())
+        {
+            return sema.fail(block, src, bad_shapes, .{ lhs_ty.fmt(zcu), rhs_ty.fmt(zcu) });
+        }
+        if (sema.isNativeSpirvMatrix(lhs_ty)) {
+            if (try sema.addMatrixMul(block, src, rhs_ty, lhs, rhs)) |result| return result;
+        }
+        return sema.matrixTimesVector(block, src, lhs, rhs);
+    }
+    if (lhs_tag == .vector and rhs_tag == .matrix) {
+        if (lhs_ty.vectorLen(zcu) != rhs_ty.childType(zcu).vectorLen(zcu) or
+            lhs_ty.childType(zcu).toIntern() != rhs_ty.scalarType(zcu).toIntern())
+        {
+            return sema.fail(block, src, bad_shapes, .{ lhs_ty.fmt(zcu), rhs_ty.fmt(zcu) });
+        }
+        const result_ty = try pt.vectorType(.{
+            .len = @intCast(rhs_ty.arrayLen(zcu)),
+            .child = lhs_ty.childType(zcu).toIntern(),
+        });
+        if (sema.isNativeSpirvMatrix(rhs_ty)) {
+            if (try sema.addMatrixMul(block, src, result_ty, lhs, rhs)) |result| return result;
+        }
+        const elems = try sema.arena.alloc(Air.Inst.Ref, @intCast(result_ty.vectorLen(zcu)));
+        for (elems, 0..) |*elem, j| {
+            elem.* = try sema.vectorDot(block, src, lhs, try sema.matrixColumn(block, src, rhs, j));
+        }
+        return sema.aggregateFromElems(block, src, result_ty, elems);
+    }
+
+    // A matrix and a scalar.
+    const matrix, const matrix_ty, const scalar, const scalar_src = if (lhs_tag == .matrix)
+        .{ lhs, lhs_ty, rhs, rhs_src }
+    else
+        .{ rhs, rhs_ty, lhs, lhs_src };
+    switch (sema.typeOf(scalar).zigTypeTag(zcu)) {
+        .float, .comptime_float, .comptime_int => {},
+        else => return sema.fail(block, src, bad_shapes, .{ lhs_ty.fmt(zcu), rhs_ty.fmt(zcu) }),
+    }
+    const coerced_scalar = try sema.coerce(block, matrix_ty.scalarType(zcu), scalar, scalar_src);
+    if (sema.isNativeSpirvMatrix(matrix_ty)) {
+        if (try sema.addMatrixMul(block, src, matrix_ty, matrix, coerced_scalar)) |result| return result;
+    }
+    const scale = try sema.splatScalar(block, src, matrix_ty.childType(zcu), coerced_scalar);
+    const cols = try sema.arena.alloc(Air.Inst.Ref, @intCast(matrix_ty.arrayLen(zcu)));
+    for (cols, 0..) |*col, j| {
+        col.* = try sema.analyzeArithmetic(block, .mul, try sema.matrixColumn(block, src, matrix, j), scale, src, src, src, want_safety);
+    }
+    return sema.aggregateFromElems(block, src, matrix_ty, cols);
+}
+
+/// Whether `ty` is a matrix SPIR-V can multiply and transpose with its own
+/// instructions: 2 to 4 columns of 2 to 4 rows on a shader target.
+fn isNativeSpirvMatrix(sema: *Sema, ty: Type) bool {
+    const zcu = sema.pt.zcu;
+    const target = zcu.getTarget();
+    if (!target.cpu.arch.isSpirv() or (target.os.tag != .vulkan and target.os.tag != .opengl)) return false;
+    const cols = ty.arrayLen(zcu);
+    const rows = ty.childType(zcu).vectorLen(zcu);
+    return cols >= 2 and cols <= 4 and rows >= 2 and rows <= 4;
+}
+
+/// Emits `matrix_mul` unless both operands are comptime-known, which the
+/// caller then folds itself.
+fn addMatrixMul(sema: *Sema, block: *Block, src: LazySrcLoc, result_ty: Type, lhs: Air.Inst.Ref, rhs: Air.Inst.Ref) CompileError!?Air.Inst.Ref {
+    if (sema.resolveValue(lhs) != null and sema.resolveValue(rhs) != null) return null;
+    try sema.requireRuntimeBlock(block, src, null);
+    return try block.addInst(.{
+        .tag = .matrix_mul,
+        .data = .{ .ty_pl = .{
+            .ty = result_ty,
+            .payload = try sema.addExtra(Air.Bin{ .lhs = lhs, .rhs = rhs }),
+        } },
+    });
+}
+
+/// Negates `matrix` column by column.
+fn negateMatrix(sema: *Sema, block: *Block, src: LazySrcLoc, matrix: Air.Inst.Ref) CompileError!Air.Inst.Ref {
+    const zcu = sema.pt.zcu;
+    const matrix_ty = sema.typeOf(matrix);
+    const column_ty = matrix_ty.childType(zcu);
+    const cols = try sema.arena.alloc(Air.Inst.Ref, @intCast(matrix_ty.arrayLen(zcu)));
+    for (cols, 0..) |*col, j| {
+        const column = try sema.matrixColumn(block, src, matrix, j);
+        if (sema.resolveValue(column)) |column_val| {
+            col.* = .fromValue(try arith.negateFloat(sema, column_ty, column_val));
+        } else {
+            try sema.requireRuntimeBlock(block, src, null);
+            col.* = try block.addUnOp(if (block.float_mode == .optimized) .neg_optimized else .neg, column);
+        }
+    }
+    return sema.aggregateFromElems(block, src, matrix_ty, cols);
+}
+
+/// Column `j` of `matrix`.
+fn matrixColumn(sema: *Sema, block: *Block, src: LazySrcLoc, matrix: Air.Inst.Ref, j: usize) CompileError!Air.Inst.Ref {
+    return sema.elemVal(block, src, matrix, try sema.pt.intRef(.usize, j), src, false);
+}
+
+/// `matrix * vector`: the matrix's columns, each scaled by the matching
+/// element of `vector`, summed in column order.
+fn matrixTimesVector(sema: *Sema, block: *Block, src: LazySrcLoc, matrix: Air.Inst.Ref, vector: Air.Inst.Ref) CompileError!Air.Inst.Ref {
+    const pt = sema.pt;
+    const zcu = pt.zcu;
+    const matrix_ty = sema.typeOf(matrix);
+    const column_ty = matrix_ty.childType(zcu);
+    var sum: Air.Inst.Ref = .none;
+    for (0..@intCast(matrix_ty.arrayLen(zcu))) |k| {
+        const elem = try sema.elemVal(block, src, vector, try pt.intRef(.usize, k), src, false);
+        const scale = try sema.splatScalar(block, src, column_ty, elem);
+        const term = try sema.analyzeArithmetic(block, .mul, try sema.matrixColumn(block, src, matrix, k), scale, src, src, src, true);
+        sum = if (sum == .none) term else try sema.analyzeArithmetic(block, .add, sum, term, src, src, src, true);
+    }
+    return sum;
+}
+
+/// The dot product of two vectors, summed in element order.
+fn vectorDot(sema: *Sema, block: *Block, src: LazySrcLoc, a: Air.Inst.Ref, b: Air.Inst.Ref) CompileError!Air.Inst.Ref {
+    const pt = sema.pt;
+    const zcu = pt.zcu;
+    const product = try sema.analyzeArithmetic(block, .mul, a, b, src, src, src, true);
+    var sum = try sema.elemVal(block, src, product, try pt.intRef(.usize, 0), src, false);
+    for (1..sema.typeOf(a).vectorLen(zcu)) |i| {
+        const elem = try sema.elemVal(block, src, product, try pt.intRef(.usize, i), src, false);
+        sum = try sema.analyzeArithmetic(block, .add, sum, elem, src, src, src, true);
+    }
+    return sum;
+}
+
+/// `scalar` in every element of `vector_ty`.
+fn splatScalar(sema: *Sema, block: *Block, src: LazySrcLoc, vector_ty: Type, scalar: Air.Inst.Ref) CompileError!Air.Inst.Ref {
+    if (sema.resolveValue(scalar)) |scalar_val| {
+        return .fromValue(try sema.pt.aggregateSplatValue(vector_ty, scalar_val));
+    }
+    try sema.requireRuntimeBlock(block, src, null);
+    return block.addTyOp(.splat, vector_ty, scalar);
+}
+
+/// An aggregate of type `ty`, comptime-known when every element is.
+fn aggregateFromElems(sema: *Sema, block: *Block, src: LazySrcLoc, ty: Type, elems: []const Air.Inst.Ref) CompileError!Air.Inst.Ref {
+    const vals = try sema.arena.alloc(InternPool.Index, elems.len);
+    for (vals, elems) |*val, elem| {
+        val.* = (sema.resolveValue(elem) orelse {
+            try sema.requireRuntimeBlock(block, src, null);
+            return block.addAggregateInit(ty, elems);
+        }).toIntern();
+    }
+    return .fromValue(try sema.pt.aggregateValue(ty, vals));
+}
+
+fn zirTranspose(sema: *Sema, block: *Block, extended: Zir.Inst.Extended.InstData) CompileError!Air.Inst.Ref {
+    const pt = sema.pt;
+    const zcu = pt.zcu;
+    const extra = sema.code.extraData(Zir.Inst.UnNode, extended.operand).data;
+    const src = block.nodeOffset(extra.node);
+    const operand_src = block.builtinCallArgSrc(extra.node, 0);
+    const operand = sema.resolveInst(extra.operand);
+    const matrix_ty = sema.typeOf(operand);
+    if (matrix_ty.zigTypeTag(zcu) != .matrix) {
+        return sema.fail(block, operand_src, "expected matrix, found '{f}'", .{matrix_ty.fmt(zcu)});
+    }
+    const cols: u32 = @intCast(matrix_ty.arrayLen(zcu));
+    const rows = matrix_ty.childType(zcu).vectorLen(zcu);
+    const result_column_ty = try pt.vectorType(.{ .len = cols, .child = matrix_ty.scalarType(zcu).toIntern() });
+    const result_ty = try pt.matrixType(.{ .cols = rows, .column = result_column_ty.toIntern() });
+
+    if (sema.isNativeSpirvMatrix(matrix_ty) and sema.resolveValue(operand) == null) {
+        try sema.requireRuntimeBlock(block, src, operand_src);
+        return block.addTyOp(.matrix_transpose, result_ty, operand);
+    }
+    const columns = try sema.arena.alloc(Air.Inst.Ref, cols);
+    for (columns, 0..) |*column, j| column.* = try sema.matrixColumn(block, src, operand, j);
+    const result_cols = try sema.arena.alloc(Air.Inst.Ref, rows);
+    const elems = try sema.arena.alloc(Air.Inst.Ref, cols);
+    for (result_cols, 0..) |*result_col, i| {
+        for (elems, columns) |*elem, column| {
+            elem.* = try sema.elemVal(block, src, column, try pt.intRef(.usize, i), src, false);
+        }
+        result_col.* = try sema.aggregateFromElems(block, src, result_column_ty, elems);
+    }
+    return sema.aggregateFromElems(block, src, result_ty, result_cols);
+}
+
 fn analyzePtrArithmetic(
     sema: *Sema,
     block: *Block,
@@ -23147,6 +23401,9 @@ fn checkVectorizableBinaryOperands(
     const zcu = pt.zcu;
     const lhs_zig_ty_tag = lhs_ty.zigTypeTag(zcu);
     const rhs_zig_ty_tag = rhs_ty.zigTypeTag(zcu);
+    if (lhs_zig_ty_tag == .matrix or rhs_zig_ty_tag == .matrix) {
+        return sema.fail(block, src, "matrices support only the '+', '-' and '*' operators", .{});
+    }
     if (lhs_zig_ty_tag != .vector and rhs_zig_ty_tag != .vector) return;
 
     const lhs_is_vector = switch (lhs_zig_ty_tag) {

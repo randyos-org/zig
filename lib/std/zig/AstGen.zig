@@ -9484,6 +9484,14 @@ fn builtinCall(
             });
             return rvalue(gz, ri, result, node);
         },
+        .transpose => {
+            const operand = try expr(gz, scope, .{ .rl = .none }, params[0]);
+            const result = try gz.addExtendedPayload(.transpose, Zir.Inst.UnNode{
+                .node = gz.nodeIndexToRelative(node),
+                .operand = operand,
+            });
+            return rvalue(gz, ri, result, node);
+        },
         .error_from_int => {
             const operand = try expr(gz, scope, .{ .rl = .none }, params[0]);
             const result = try gz.addExtendedPayload(.error_from_int, Zir.Inst.UnNode{

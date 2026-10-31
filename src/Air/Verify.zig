@@ -998,6 +998,8 @@ fn body(verify: *Verify, body_insts: []const Air.Inst.Index) Error!void {
             .c_va_end,
             .c_va_start,
             .spirv_runtime_array_len,
+            .matrix_mul,
+            .matrix_transpose,
             .work_item_id,
             .work_group_size,
             .work_group_id,

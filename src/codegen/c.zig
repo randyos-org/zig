@@ -3037,6 +3037,8 @@ fn genBodyInner(f: *Function, body: []const Air.Inst.Index) Error!void {
             .work_group_size,
             .work_group_id,
             .spirv_runtime_array_len,
+            .matrix_mul,
+            .matrix_transpose,
             => unreachable,
 
             // Instructions that are known to always be `noreturn` based on their tag.

@@ -173200,6 +173200,7 @@ fn genBody(cg: *CodeGen, body: []const Air.Inst.Index) InnerError!void {
             .legalize_compiler_rt_call => unreachable,
 
             .work_item_id, .work_group_size, .work_group_id, .spirv_runtime_array_len => unreachable,
+            .matrix_mul, .matrix_transpose => unreachable,
         }
         try cg.resetTemps(@fromBackingInt(@intCast(0)));
         cg.checkInvariantsAfterAirInst();

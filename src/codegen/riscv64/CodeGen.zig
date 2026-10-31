@@ -1669,6 +1669,8 @@ fn genBody(func: *Func, body: []const Air.Inst.Index) InnerError!void {
             .work_group_size => unreachable,
             .work_group_id => unreachable,
             .spirv_runtime_array_len => unreachable,
+            .matrix_mul => unreachable,
+            .matrix_transpose => unreachable,
             // zig fmt: on
         }
 

@@ -4088,6 +4088,8 @@ fn genInst(cg: *CodeGen, inst: Air.Inst.Index) Error!void {
         .field_parent_ptr => try cg.airFieldParentPtr(inst),
         .runtime_nav_ptr => try cg.airRuntimeNavPtr(inst),
         .spirv_runtime_array_len => try cg.airSpirvRuntimeArrayLen(inst),
+        .matrix_mul => try cg.airMatrixMul(inst),
+        .matrix_transpose => try cg.airMatrixTranspose(inst),
         .work_item_id => try cg.airWorkItemId(inst),
         .work_group_size => try cg.airWorkGroupSize(inst),
         .work_group_id => try cg.airWorkGroupId(inst),
@@ -7935,6 +7937,20 @@ fn airArrayElemVal(cg: *CodeGen, inst: Air.Inst.Index) !?Id {
     const elem_repr: Repr = if (is_vector) .direct else .indirect;
     const array_ty_id = try cg.resolveType(array_ty, .direct);
     const elem_ty_id = try cg.resolveType(elem_ty, elem_repr);
+
+    // A comptime-known index reads the element directly.
+    if (bin_op.rhs.toInterned()) |index_ip| {
+        const index: u32 = @intCast(Value.fromInterned(index_ip).toUnsignedInt(zcu));
+        const result_id = cg.allocId();
+        try cg.body.emit(gpa, .OpCompositeExtract, .{
+            .id_result_type = elem_ty_id,
+            .id_result = result_id,
+            .composite = array_id,
+            .indexes = &.{index},
+        });
+        if (is_vector) return result_id;
+        return try cg.convertToDirect(elem_ty, result_id);
+    }
     const ptr_array_ty_id = try cg.ptrType(array_ty_id, .function);
     const ptr_elem_ty_id = try cg.ptrType(elem_ty_id, .function);
 
@@ -8496,6 +8512,70 @@ fn airFieldParentPtr(cg: *CodeGen, inst: Air.Inst.Index) !?Id {
 fn airRuntimeNavPtr(cg: *CodeGen, inst: Air.Inst.Index) !?Id {
     const ty_nav = cg.air.instructions.items(.data)[@backingInt(inst)].ty_nav;
     return try cg.resolveNav(ty_nav.nav);
+}
+
+fn airMatrixMul(cg: *CodeGen, inst: Air.Inst.Index) !?Id {
+    const gpa = cg.gpa;
+    const zcu = cg.zcu;
+    const ty_pl = cg.air.instructions.items(.data)[@backingInt(inst)].ty_pl;
+    const extra = cg.air.extraData(Air.Bin, ty_pl.payload).data;
+    const lhs_is_matrix = cg.typeOf(extra.lhs).zigTypeTag(zcu) == .matrix;
+    const rhs_ty = cg.typeOf(extra.rhs);
+    const lhs_id = try cg.resolve(extra.lhs);
+    const rhs_id = try cg.resolve(extra.rhs);
+    const result_ty_id = try cg.resolveType(cg.typeOfIndex(inst), .direct);
+    const result_id = cg.allocId();
+    if (!lhs_is_matrix) switch (rhs_ty.zigTypeTag(zcu)) {
+        .matrix => if (cg.typeOf(extra.lhs).zigTypeTag(zcu) == .vector) {
+            try cg.body.emit(gpa, .OpVectorTimesMatrix, .{
+                .id_result_type = result_ty_id,
+                .id_result = result_id,
+                .vector = lhs_id,
+                .matrix = rhs_id,
+            });
+        } else {
+            try cg.body.emit(gpa, .OpMatrixTimesScalar, .{
+                .id_result_type = result_ty_id,
+                .id_result = result_id,
+                .matrix = rhs_id,
+                .scalar = lhs_id,
+            });
+        },
+        else => unreachable,
+    } else switch (rhs_ty.zigTypeTag(zcu)) {
+        .matrix => try cg.body.emit(gpa, .OpMatrixTimesMatrix, .{
+            .id_result_type = result_ty_id,
+            .id_result = result_id,
+            .left_matrix = lhs_id,
+            .right_matrix = rhs_id,
+        }),
+        .vector => try cg.body.emit(gpa, .OpMatrixTimesVector, .{
+            .id_result_type = result_ty_id,
+            .id_result = result_id,
+            .matrix = lhs_id,
+            .vector = rhs_id,
+        }),
+        else => try cg.body.emit(gpa, .OpMatrixTimesScalar, .{
+            .id_result_type = result_ty_id,
+            .id_result = result_id,
+            .matrix = lhs_id,
+            .scalar = rhs_id,
+        }),
+    }
+    return result_id;
+}
+
+fn airMatrixTranspose(cg: *CodeGen, inst: Air.Inst.Index) !?Id {
+    const ty_op = cg.air.instructions.items(.data)[@backingInt(inst)].ty_op;
+    const matrix_id = try cg.resolve(ty_op.operand);
+    const result_ty_id = try cg.resolveType(cg.typeOfIndex(inst), .direct);
+    const result_id = cg.allocId();
+    try cg.body.emit(cg.gpa, .OpTranspose, .{
+        .id_result_type = result_ty_id,
+        .id_result = result_id,
+        .matrix = matrix_id,
+    });
+    return result_id;
 }
 
 fn airSpirvRuntimeArrayLen(cg: *CodeGen, inst: Air.Inst.Index) !?Id {

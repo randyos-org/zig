@@ -983,6 +983,15 @@ pub const Inst = struct {
         /// Result type is always `u32`.
         /// Uses the `ty_pl` field, payload is `StructField`.
         spirv_runtime_array_len,
+        /// The product of a matrix and a matrix, a vector or a scalar, or of a
+        /// vector and a matrix, on SPIR-V's matrix type. The result type is
+        /// `ty_pl.ty`. Only emitted for SPIR-V targets.
+        /// Uses the `ty_pl` field, payload is `Bin`.
+        matrix_mul,
+        /// The transpose of a matrix, on SPIR-V's matrix type. Only emitted for
+        /// SPIR-V targets.
+        /// Uses the `ty_op` field.
+        matrix_transpose,
 
         /// Implements @workItemId builtin.
         /// Result type is always `u32`
@@ -1717,6 +1726,7 @@ pub fn typeOfIndex(air: *const Air, inst: Air.Inst.Index, ip: *const InternPool)
         .field_parent_ptr,
         .cmp_vector,
         .cmp_vector_optimized,
+        .matrix_mul,
         .add_with_overflow,
         .sub_with_overflow,
         .mul_with_overflow,
@@ -1771,6 +1781,7 @@ pub fn typeOfIndex(air: *const Air, inst: Air.Inst.Index, ip: *const InternPool)
         .int_from_float_optimized_safe,
         .float_from_int,
         .splat,
+        .matrix_transpose,
         .get_union_tag,
         .clz,
         .ctz,
@@ -2146,6 +2157,8 @@ pub fn mustLower(air: Air, inst: Air.Inst.Index, ip: *const InternPool) bool {
         .work_group_id,
         .legalize_vec_elem_val,
         .spirv_runtime_array_len,
+        .matrix_mul,
+        .matrix_transpose,
         => false,
 
         .is_non_null_ptr, .is_null_ptr, .is_non_err_ptr, .is_err_ptr => air.typeOf(data.un_op, ip).isVolatilePtrIp(ip),

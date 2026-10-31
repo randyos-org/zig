@@ -1047,6 +1047,8 @@ fn legalizeBody(l: *Legalize, body_start: usize, body_len: usize) Error!void {
             .legalize_vec_store_elem,
             .legalize_compiler_rt_call,
             .spirv_runtime_array_len,
+            .matrix_mul,
+            .matrix_transpose,
             .error_cast,
             .error_from_int,
             .int_from_error,

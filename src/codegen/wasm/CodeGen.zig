@@ -1952,6 +1952,8 @@ fn genInst(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
         .work_group_size,
         .work_group_id,
         .spirv_runtime_array_len,
+        .matrix_mul,
+        .matrix_transpose,
         => unreachable,
     };
 }

@@ -258,6 +258,8 @@ pub fn analyze(isel: *Select, air_body: []const Air.Inst.Index) !void {
         .work_group_size,
         .work_group_id,
         .spirv_runtime_array_len,
+        .matrix_mul,
+        .matrix_transpose,
         .array_to_vector,
         => unreachable,
         .ret_ptr => {
@@ -7515,6 +7517,7 @@ pub fn body(isel: *Select, air_body: []const Air.Inst.Index) codegen.Error!void 
             if (air.next()) |next_air_tag| continue :air_tag next_air_tag;
         },
         .work_item_id, .work_group_size, .work_group_id, .spirv_runtime_array_len => unreachable,
+        .matrix_mul, .matrix_transpose => unreachable,
     }
     assert(air.body_index == 0);
 }

@@ -109,3 +109,49 @@ test "@Matrix init syntax and indexing" {
     try S.doTheTest();
     try comptime S.doTheTest();
 }
+
+test "@Matrix arithmetic" {
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_riscv64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest;
+    if (builtin.cpu.arch.isSpirv()) return error.SkipZigTest;
+
+    const S = struct {
+        fn doTheTest() !void {
+            var x: f32 = 1;
+            _ = &x;
+            // [[1 3 5] [2 4 6]] and [[7 10] [8 11] [9 12]]
+            const a: @Matrix(2, 3, f32) = .{ .{ x, 2 }, .{ 3, 4 }, .{ 5, 6 } };
+            const b: @Matrix(3, 2, f32) = .{ .{ 7, 8, 9 }, .{ 10, 11, 12 } };
+
+            const ab: [2][2]f32 = a * b;
+            try expectEqual([2][2]f32{ .{ 76, 100 }, .{ 103, 136 } }, ab);
+            try expectEqual(@Vector(2, f32){ 9, 12 }, a * @Vector(3, f32){ 1, 1, 1 });
+            try expectEqual(@Vector(3, f32){ 5, 11, 17 }, @Vector(2, f32){ 1, 2 } * a);
+
+            const twice: [3][2]f32 = a * 2;
+            try expectEqual([3][2]f32{ .{ 2, 4 }, .{ 6, 8 }, .{ 10, 12 } }, twice);
+            const twice_left: [3][2]f32 = 2 * a;
+            try expectEqual(twice, twice_left);
+            const sum: [3][2]f32 = a + a;
+            try expectEqual(twice, sum);
+            const diff: [3][2]f32 = a - a;
+            try expectEqual([3][2]f32{ .{ 0, 0 }, .{ 0, 0 }, .{ 0, 0 } }, diff);
+            const neg: [3][2]f32 = -a;
+            try expectEqual([3][2]f32{ .{ -1, -2 }, .{ -3, -4 }, .{ -5, -6 } }, neg);
+
+            const t: [2][3]f32 = @transpose(a);
+            try expectEqual([2][3]f32{ .{ 1, 3, 5 }, .{ 2, 4, 6 } }, t);
+            const tt: [3][2]f32 = @transpose(@transpose(a));
+            try expectEqual([3][2]f32{ .{ 1, 2 }, .{ 3, 4 }, .{ 5, 6 } }, tt);
+
+            var m = a;
+            m += a;
+            const m_arr: [3][2]f32 = m;
+            try expectEqual(twice, m_arr);
+        }
+    };
+    try S.doTheTest();
+    try comptime S.doTheTest();
+}

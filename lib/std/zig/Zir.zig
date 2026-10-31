@@ -2194,6 +2194,9 @@ pub const Inst = struct {
         /// `operand` is `src_node: Ast.Node.Offset`.
         /// `small` is  a `std.Target.CType`.
         validate_c_type,
+        /// Implements builtin `@transpose`.
+        /// `operand` is payload index to `UnNode`.
+        transpose,
 
         pub const InstData = struct {
             opcode: Extended,
@@ -4427,6 +4430,7 @@ fn findTrackableInner(
                 .disable_intrinsics,
                 .select,
                 .int_from_error,
+                .transpose,
                 .error_from_int,
                 .reify_slice_arg_ty,
                 .reify_enum_value_slice_ty,

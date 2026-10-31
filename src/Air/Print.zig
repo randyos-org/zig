@@ -279,6 +279,7 @@ const Writer = struct {
             .array_to_vector,
             .float_from_int,
             .splat,
+            .matrix_transpose,
             .int_from_float,
             .int_from_float_optimized,
             .int_from_float_safe,
@@ -309,6 +310,7 @@ const Writer = struct {
             .sub_with_overflow,
             .mul_with_overflow,
             .shl_with_overflow,
+            .matrix_mul,
             => try w.writeTyPlBin(s, inst),
 
             .call,

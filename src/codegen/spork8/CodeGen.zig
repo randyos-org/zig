@@ -416,6 +416,8 @@ fn genInst(cg: *CodeGen, inst: Air.Inst.Index) codegen.Error!void {
         .cmp_lte_errors_len,
         .runtime_nav_ptr,
         .spirv_runtime_array_len,
+        .matrix_mul,
+        .matrix_transpose,
         .legalize_vec_store_elem,
         .legalize_vec_elem_val,
         .legalize_compiler_rt_call,

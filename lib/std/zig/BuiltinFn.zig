@@ -109,6 +109,7 @@ pub const Tag = enum {
     This,
     trap,
     truncate,
+    transpose,
     EnumLiteral,
     Int,
     Tuple,
@@ -938,6 +939,13 @@ pub const list = list: {
             "@truncate",
             .{
                 .tag = .truncate,
+                .param_count = 1,
+            },
+        },
+        .{
+            "@transpose",
+            .{
+                .tag = .transpose,
                 .param_count = 1,
             },
         },
