@@ -632,8 +632,7 @@ const page_size_min_default: ?usize = switch (builtin.os.tag) {
     },
     .illumos => switch (builtin.cpu.arch) {
         // src/uts/*/sys/machparam.h
-        .x86, .x86_64 => 4 << 10,
-        .sparc, .sparc64 => 8 << 10,
+        .x86_64 => 4 << 10,
         else => null,
     },
     .fuchsia => switch (builtin.cpu.arch) {
@@ -721,7 +720,7 @@ const page_size_min_default: ?usize = switch (builtin.os.tag) {
     },
     .freestanding, .other => switch (builtin.cpu.arch) {
         .wasm32, .wasm64 => 64 << 10,
-        .x86, .x86_64 => 4 << 10,
+        .x86, .x86c16, .x86_64 => 4 << 10,
         .aarch64, .aarch64_be => 4 << 10,
         else => null,
     },
@@ -796,8 +795,7 @@ const page_size_max_default: ?usize = switch (builtin.os.tag) {
     },
     .illumos => switch (builtin.cpu.arch) {
         // src/uts/*/sys/machparam.h
-        .x86, .x86_64 => 4 << 10,
-        .sparc, .sparc64 => 8 << 10,
+        .x86_64 => 4 << 10,
         else => null,
     },
     .fuchsia => switch (builtin.cpu.arch) {
