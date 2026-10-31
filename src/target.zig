@@ -667,6 +667,42 @@ pub fn addrSpaceIsLogical(target: *const std.Target, as: AddressSpace) bool {
     };
 }
 
+pub fn getSpirvPtrRwFeatures(
+    target: *const std.Target,
+    as: AddressSpace,
+    bits: u16,
+) std.EnumSet(std.Target.spirv.Feature) {
+    const as_features: [2]std.Target.spirv.Feature = switch (as) {
+        .storage_buffer, .physical_storage_buffer => .{
+            .storage_buffer8bit_access, .storage_buffer16bit_access,
+        },
+        .uniform => .{
+            .uniform_and_storage_buffer8bit_access, .uniform_and_storage_buffer16bit_access,
+        },
+        .push_constant => .{
+            .storage_push_constant8, .storage_push_constant16,
+        },
+        else => return .empty,
+    };
+
+    switch (bits) {
+        0 => return .empty,
+        1...8 => {
+            return .initMany(&.{ as_features[0], .int8 });
+        },
+        9...16 => {
+            return .initMany(&.{ as_features[1], .int16 });
+        },
+        17...32 => {
+            return .empty;
+        },
+        else => {
+            if (target.cpu.arch != .spirv64) return .initOne(.int64);
+            return .empty;
+        },
+    }
+}
+
 pub fn llvmMachineAbi(target: *const std.Target) ?[:0]const u8 {
     return switch (target.cpu.arch) {
         .aarch64, .aarch64_be => if (target.abi.float() == .soft)
