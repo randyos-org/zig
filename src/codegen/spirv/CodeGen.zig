@@ -5485,6 +5485,11 @@ fn airCall(cg: *CodeGen, inst: Air.Inst.Index, modifier: std.lang.CallModifier) 
     const callee_ty = cg.typeOf(air_call.callee);
     const zig_fn_ty = switch (callee_ty.zigTypeTag(zcu)) {
         .@"fn" => callee_ty,
+        .pointer => blk: {
+            const pointee = callee_ty.childType(zcu);
+            if (pointee.zigTypeTag(zcu) != .@"fn") unreachable;
+            break :blk pointee;
+        },
         else => unreachable, // rejected by Sema for SPIR-V
     };
     const fn_info = zcu.typeToFunc(zig_fn_ty).?;
@@ -5643,6 +5648,22 @@ fn bitCast(
                 .id_result_type = dst_ty_id,
                 .id_result = result_id,
                 .integer_value = src_id,
+            });
+            break :blk result_id;
+        }
+        if (src_ty.isPtrAtRuntime(zcu) and dst_ty.zigTypeTag(zcu) == .int) {
+            if (target_util.addrSpaceIsLogical(target, src_ty.ptrAddressSpace(zcu))) {
+                return cg.fail(
+                    "cannot cast pointer with address space '{s}' to integer",
+                    .{@tagName(src_ty.ptrAddressSpace(zcu))},
+                );
+            }
+
+            const result_id = cg.allocId();
+            try cg.body.emit(gpa, .OpConvertPtrToU, .{
+                .id_result_type = dst_ty_id,
+                .id_result = result_id,
+                .pointer = src_id,
             });
             break :blk result_id;
         }
