@@ -31226,56 +31226,57 @@ fn ensureSpirvPtrRwAllowed(
     const pt = sema.pt;
     const zcu = pt.zcu;
     const ip = &zcu.intern_pool;
+    const target = zcu.getTarget();
 
-    switch (elem_ty.zigTypeTag(zcu)) {
-        .int => {
-            const bits = elem_ty.bitSize(zcu);
-            const target = zcu.getTarget();
-            var it = target_util.getSpirvPtrRwFeatures(target, as, @intCast(bits)).iterator();
-            while (it.next()) |feature| {
-                if (target.cpu.has(.spirv, feature)) continue;
-                return sema.fail(
-                    block,
-                    src,
-                    "'{f}' requires feature '{t}' to be loaded/stored in address space '{t}'",
-                    .{
-                        elem_ty.fmt(zcu), feature, as,
-                    },
-                );
-            }
+    const bits: u16, const kind: target_util.SpirvScalarKind = switch (elem_ty.zigTypeTag(zcu)) {
+        .int => .{ elem_ty.intInfo(zcu).bits, .int },
+        // Bools are stored as `u1`.
+        .bool => .{ 1, .int },
+        .@"enum" => .{ elem_ty.backingIntType(zcu).intInfo(zcu).bits, .int },
+        .error_set => .{ zcu.errorSetBits(), .int },
+        .float => .{ elem_ty.floatBits(target), .float },
+        .array, .vector => return sema.ensureSpirvPtrRwAllowed(block, src, as, elem_ty.childType(zcu)),
+        .optional => {
+            try sema.ensureSpirvPtrRwAllowed(block, src, as, elem_ty.optionalChild(zcu));
+            if (elem_ty.optionalReprIsPayload(zcu)) return;
+            // The non-null flag is stored as a bool.
+            return sema.ensureSpirvPtrRwAllowed(block, src, as, .bool);
         },
-        .array, .vector => {
-            const arr_elem_ty = elem_ty.childType(zcu);
-            try sema.ensureSpirvPtrRwAllowed(block, src, as, arr_elem_ty);
+        .error_union => {
+            try sema.ensureSpirvPtrRwAllowed(block, src, as, elem_ty.errorUnionSet(zcu));
+            return sema.ensureSpirvPtrRwAllowed(block, src, as, elem_ty.errorUnionPayload(zcu));
         },
         .@"struct" => {
-            const struct_ty = ip.loadStructType(elem_ty.toIntern());
-
-            if (struct_ty.layout == .@"packed") {
-                try sema.ensureSpirvPtrRwAllowed(block, src, as, elem_ty.backingIntType(zcu));
-                return;
+            if (elem_ty.containerLayout(zcu) == .@"packed") {
+                return sema.ensureSpirvPtrRwAllowed(block, src, as, elem_ty.backingIntType(zcu));
             }
-
-            var it = struct_ty.iterateRuntimeOrder(ip);
-            while (it.next()) |field_index| {
-                const field_ty = Type.fromInterned(struct_ty.field_types.get(ip)[field_index]);
-                try sema.ensureSpirvPtrRwAllowed(block, src, as, field_ty);
+            for (0..elem_ty.structFieldCount(zcu)) |field_index| {
+                if (elem_ty.structFieldIsComptime(field_index, zcu)) continue;
+                try sema.ensureSpirvPtrRwAllowed(block, src, as, elem_ty.fieldType(field_index, zcu));
             }
+            return;
         },
         .@"union" => {
-            const union_ty = ip.loadUnionType(elem_ty.toIntern());
-
-            if (union_ty.layout == .@"packed") {
-                try sema.ensureSpirvPtrRwAllowed(block, src, as, elem_ty.backingIntType(zcu));
-                return;
+            if (elem_ty.containerLayout(zcu) == .@"packed") {
+                return sema.ensureSpirvPtrRwAllowed(block, src, as, elem_ty.backingIntType(zcu));
             }
-
-            for (0..union_ty.field_types.len) |field_index| {
-                const field_ty = Type.fromInterned(union_ty.field_types.get(ip)[field_index]);
-                try sema.ensureSpirvPtrRwAllowed(block, src, as, field_ty);
+            if (elem_ty.unionTagTypeRuntime(zcu)) |tag_ty| {
+                try sema.ensureSpirvPtrRwAllowed(block, src, as, tag_ty);
             }
+            for (ip.loadUnionType(elem_ty.toIntern()).field_types.get(ip)) |field_ty| {
+                try sema.ensureSpirvPtrRwAllowed(block, src, as, .fromInterned(field_ty));
+            }
+            return;
         },
         else => return,
+    };
+
+    var it = target_util.getSpirvPtrRwFeatures(as, bits, kind).iterator();
+    while (it.next()) |feature| {
+        if (target.cpu.has(.spirv, feature)) continue;
+        return sema.fail(block, src, "cannot load or store '{f}' in address space '{t}' without feature '{t}'", .{
+            elem_ty.fmt(zcu), as, feature,
+        });
     }
 }
 

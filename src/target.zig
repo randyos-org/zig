@@ -667,10 +667,15 @@ pub fn addrSpaceIsLogical(target: *const std.Target, as: AddressSpace) bool {
     };
 }
 
+pub const SpirvScalarKind = enum { int, float };
+
+/// Features required to load or store a `bits`-wide scalar through a pointer in address space `as`.
+/// Without them, the SPIR-V backend widens 8- and 16-bit scalars to 32 bits, which reads and writes
+/// past the value in externally visible memory.
 pub fn getSpirvPtrRwFeatures(
-    target: *const std.Target,
     as: AddressSpace,
     bits: u16,
+    kind: SpirvScalarKind,
 ) std.EnumSet(std.Target.spirv.Feature) {
     const as_features: [2]std.Target.spirv.Feature = switch (as) {
         .storage_buffer, .physical_storage_buffer => .{
@@ -685,22 +690,18 @@ pub fn getSpirvPtrRwFeatures(
         else => return .empty,
     };
 
-    switch (bits) {
-        0 => return .empty,
-        1...8 => {
-            return .initMany(&.{ as_features[0], .int8 });
-        },
-        9...16 => {
-            return .initMany(&.{ as_features[1], .int16 });
-        },
-        17...32 => {
-            return .empty;
-        },
-        else => {
-            if (target.cpu.arch != .spirv64) return .initOne(.int64);
-            return .empty;
-        },
-    }
+    const feature_16bit: std.Target.spirv.Feature = switch (kind) {
+        .int => .int16,
+        .float => .float16,
+    };
+    return switch (bits) {
+        0 => .empty,
+        1...8 => .initMany(&.{ as_features[0], .int8 }),
+        9...16 => .initMany(&.{ as_features[1], feature_16bit }),
+        // Wider ints are either native or lowered to arrays of 32-bit limbs; neither touches memory
+        // outside the value.
+        else => .empty,
+    };
 }
 
 pub fn llvmMachineAbi(target: *const std.Target) ?[:0]const u8 {

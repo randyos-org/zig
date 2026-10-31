@@ -16,7 +16,7 @@ const push_constant_u8 = @extern(*addrspace(.push_constant) extern struct { val:
     .name = "push_constant_u8",
 });
 
-const storage_struct = @extern(*addrspace(.storage_buffer) extern struct {val: S}, .{
+const storage_struct = @extern(*addrspace(.storage_buffer) extern struct { val: S }, .{
     .name = "storage_struct",
     .decoration = .{ .descriptor = .{ .set = 0, .binding = 2 } },
 });
@@ -68,11 +68,10 @@ export fn loadUnion() callconv(.kernel) void {
 // backend=auto
 // target=spirv32-opengl,spirv32-vulkan
 //
-//:40:20: error: 'u8' requires feature 'int8' to be loaded/stored in address space 'storage_buffer'
-//:44:20: error: 'u16' requires feature 'int16' to be loaded/stored in address space 'uniform'
-//:48:26: error: 'u8' requires feature 'int8' to be loaded/stored in address space 'push_constant'
-//:52:23: error: 'u8' requires feature 'int8' to be loaded/stored in address space 'storage_buffer'
-//:56:23: error: 'u8' requires feature 'int8' to be loaded/stored in address space 'storage_buffer'
-//:60:22: error: 'u8' requires feature 'int8' to be loaded/stored in address space 'storage_buffer'
-//:64:22: error: 'u8' requires feature 'int8' to be loaded/stored in address space 'storage_buffer'
-
+// :40:20: error: cannot load or store 'u8' in address space 'storage_buffer' without feature 'int8'
+// :44:20: error: cannot load or store 'u16' in address space 'uniform' without feature 'int16'
+// :48:26: error: cannot load or store 'u8' in address space 'push_constant' without feature 'int8'
+// :52:23: error: cannot load or store 'u8' in address space 'storage_buffer' without feature 'int8'
+// :56:23: error: cannot load or store 'u8' in address space 'storage_buffer' without feature 'int8'
+// :60:22: error: cannot load or store 'u8' in address space 'storage_buffer' without feature 'int8'
+// :64:22: error: cannot load or store 'u8' in address space 'storage_buffer' without feature 'int8'
