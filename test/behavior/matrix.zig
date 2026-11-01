@@ -155,3 +155,46 @@ test "@Matrix arithmetic" {
     try S.doTheTest();
     try comptime S.doTheTest();
 }
+
+test "@Matrix products fuse as std.float_options says" {
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_riscv64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest;
+    if (builtin.cpu.arch.isSpirv()) return error.SkipZigTest;
+
+    const S = struct {
+        fn doTheTest() !void {
+            // a * a + c is 2^-24 rounded once and 0 with the product rounded first
+            var a: f32 = 1 + 0x1p-12;
+            _ = &a;
+            const c: f32 = -(1 + 0x1p-11);
+            const expected: f32 = if (32 <= std.float_options.fuse_mul_add_bits) 0x1p-24 else 0;
+
+            const v: @Vector(2, f32) = .{ 1, a };
+            const m: @Matrix(2, 2, f32) = .{ .{ c, c }, .{ a, a } };
+            try expectEqual(expected, (m * v)[0]);
+            try expectEqual(expected, (m * @as(@Matrix(2, 2, f32), .{ v, v }))[1][0]);
+            const n: @Matrix(2, 2, f32) = .{ .{ c, a }, .{ c, a } };
+            try expectEqual(expected, (v * n)[1]);
+        }
+    };
+    try S.doTheTest();
+    try comptime S.doTheTest();
+}
+
+test "@Matrix products in f128 fuse as std.float_options says" {
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_riscv64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest;
+    if (builtin.cpu.arch.isSpirv()) return error.SkipZigTest;
+
+    // a * a + c is 2^-120 rounded once and 0 with the product rounded first
+    const a: f128 = 1 + 0x1p-60;
+    const c: f128 = -(1 + 0x1p-59);
+    const m: @Matrix(2, 2, f128) = .{ .{ c, c }, .{ a, a } };
+    const v: @Vector(2, f128) = .{ 1, a };
+    const expected: f128 = if (128 <= std.float_options.fuse_mul_add_bits) 0x1p-120 else 0;
+    try comptime expectEqual(expected, (m * v)[0]);
+}

@@ -3195,6 +3195,30 @@ pub fn stackGrowth(target: *const Target) StackGrowth {
     };
 }
 
+/// The widest float type, in bits, that the target has a fused multiply-add instruction for;
+/// 0 if it has none, as with a soft-float ABI.
+pub fn fusedMulAddBits(target: *const Target) u16 {
+    if (target.abi.float() == .soft) return 0;
+    return switch (target.cpu.arch) {
+        .x86, .x86_64 => if (target.cpu.has(.x86, .fma)) 64 else 0,
+        .aarch64, .aarch64_be => 64,
+        .arm, .armeb, .thumb, .thumbeb => if (target.cpu.hasAny(.arm, &.{ .vfp4, .vfp4d16 }))
+            64
+        else if (target.cpu.hasAny(.arm, &.{ .vfp4sp, .vfp4d16sp })) 32 else 0,
+        .powerpc, .powerpcle, .powerpc64, .powerpc64le => 64,
+        .riscv32, .riscv32be, .riscv64, .riscv64be => if (target.cpu.has(.riscv, .d))
+            64
+        else if (target.cpu.has(.riscv, .f)) 32 else 0,
+        .loongarch32, .loongarch64 => if (target.cpu.has(.loongarch, .d))
+            64
+        else if (target.cpu.has(.loongarch, .f)) 32 else 0,
+        .s390x => 64,
+        // Before release 6, `madd.fmt` rounds the product.
+        .mips, .mipsel, .mips64, .mips64el => if (target.cpu.hasAny(.mips, &.{ .mips32r6, .mips64r6 })) 64 else 0,
+        else => 0,
+    };
+}
+
 /// Default signedness of `char` for the native C compiler for this target
 /// Note that char signedness is implementation-defined and many compilers provide
 /// an option to override the default signedness e.g. GCC's -funsigned-char / -fsigned-char

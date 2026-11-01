@@ -107,9 +107,13 @@ pub const zon = @import("zon.zig");
 pub const start = @import("start.zig");
 
 const root = @import("root");
+const tgt = @import("builtin").target;
 
 /// Compile-time known OS settings overridable by the root source file.
 pub const os_options: Options.OperatingSystem = if (@hasDecl(root, "std_os_options")) root.std_os_options else .{};
+
+/// Compile-time known floating point settings overridable by the root source file.
+pub const float_options: Options.Float = if (@hasDecl(root, "std_float_options")) root.std_float_options else .{};
 
 /// Compile-time known settings overridable by the root source file.
 pub const options: Options = if (@hasDecl(root, "std_options")) root.std_options else .{};
@@ -238,6 +242,16 @@ pub const Options = struct {
         /// pub fn protectMemory(memory: []align(std.heap.page_size_min) u8, protection: std.process.MemoryProtection) std.process.ProtectMemoryError!void;
         /// ```
         testing: ?type = null,
+    };
+
+    pub const Float = struct {
+        /// Multiply-adds that may fuse, such as the terms of a `@Matrix` product in strict float
+        /// mode, do in floats of at most this many bits: 0 never fuses, and 128 always does, in
+        /// software where the target has no instruction for it. Defaults to the widest float the
+        /// target fuses in hardware; not with MSA, where LLVM miscompiles a vector `fma` into
+        /// `fmadd`, which takes the addend as a multiplicand.
+        fuse_mul_add_bits: u16 = if (tgt.cpu.arch.isMips() and tgt.cpu.has(.mips, .msa) and
+            @import("builtin").zig_backend == .stage2_llvm) 0 else tgt.fusedMulAddBits(),
     };
 
     enable_segfault_handler: bool = debug.default_enable_segfault_handler,

@@ -15377,9 +15377,10 @@ fn analyzeMatrixArithmetic(
         if (sema.isNativeSpirvMatrix(lhs_ty) and sema.isNativeSpirvMatrix(rhs_ty) and sema.isNativeSpirvMatrix(result_ty)) {
             if (try sema.addMatrixMul(block, src, result_ty, lhs, rhs)) |result| return result;
         }
+        const fuse = try sema.matrixFusesMulAdd(block, src, lhs_ty.scalarType(zcu));
         const cols = try sema.arena.alloc(Air.Inst.Ref, @intCast(result_ty.arrayLen(zcu)));
         for (cols, 0..) |*col, j| {
-            col.* = try sema.matrixTimesVector(block, src, lhs, try sema.matrixColumn(block, src, rhs, j));
+            col.* = try sema.matrixTimesVector(block, src, lhs, try sema.matrixColumn(block, src, rhs, j), fuse);
         }
         return sema.aggregateFromElems(block, src, result_ty, cols);
     }
@@ -15392,7 +15393,7 @@ fn analyzeMatrixArithmetic(
         if (sema.isNativeSpirvMatrix(lhs_ty)) {
             if (try sema.addMatrixMul(block, src, rhs_ty, lhs, rhs)) |result| return result;
         }
-        return sema.matrixTimesVector(block, src, lhs, rhs);
+        return sema.matrixTimesVector(block, src, lhs, rhs, try sema.matrixFusesMulAdd(block, src, lhs_ty.scalarType(zcu)));
     }
     if (lhs_tag == .vector and rhs_tag == .matrix) {
         if (lhs_ty.vectorLen(zcu) != rhs_ty.childType(zcu).vectorLen(zcu) or
@@ -15407,9 +15408,10 @@ fn analyzeMatrixArithmetic(
         if (sema.isNativeSpirvMatrix(rhs_ty)) {
             if (try sema.addMatrixMul(block, src, result_ty, lhs, rhs)) |result| return result;
         }
+        const fuse = try sema.matrixFusesMulAdd(block, src, rhs_ty.scalarType(zcu));
         const elems = try sema.arena.alloc(Air.Inst.Ref, @intCast(result_ty.vectorLen(zcu)));
         for (elems, 0..) |*elem, j| {
-            elem.* = try sema.vectorDot(block, src, lhs, try sema.matrixColumn(block, src, rhs, j));
+            elem.* = try sema.vectorDot(block, src, lhs, try sema.matrixColumn(block, src, rhs, j), fuse);
         }
         return sema.aggregateFromElems(block, src, result_ty, elems);
     }
@@ -15484,8 +15486,9 @@ fn matrixColumn(sema: *Sema, block: *Block, src: LazySrcLoc, matrix: Air.Inst.Re
 }
 
 /// `matrix * vector`: the matrix's columns, each scaled by the matching
-/// element of `vector`, summed in column order.
-fn matrixTimesVector(sema: *Sema, block: *Block, src: LazySrcLoc, matrix: Air.Inst.Ref, vector: Air.Inst.Ref) CompileError!Air.Inst.Ref {
+/// element of `vector`, summed in column order. With `fuse`, each product
+/// after the first is fused into the running sum.
+fn matrixTimesVector(sema: *Sema, block: *Block, src: LazySrcLoc, matrix: Air.Inst.Ref, vector: Air.Inst.Ref, fuse: bool) CompileError!Air.Inst.Ref {
     const pt = sema.pt;
     const zcu = pt.zcu;
     const matrix_ty = sema.typeOf(matrix);
@@ -15494,16 +15497,34 @@ fn matrixTimesVector(sema: *Sema, block: *Block, src: LazySrcLoc, matrix: Air.In
     for (0..@intCast(matrix_ty.arrayLen(zcu))) |k| {
         const elem = try sema.elemVal(block, src, vector, try pt.intRef(.usize, k), src, false);
         const scale = try sema.splatScalar(block, src, column_ty, elem);
-        const term = try sema.analyzeArithmetic(block, .mul, try sema.matrixColumn(block, src, matrix, k), scale, src, src, src, true);
+        const column = try sema.matrixColumn(block, src, matrix, k);
+        if (sum != .none and fuse) {
+            sum = try sema.fusedMulAdd(block, src, column, scale, sum);
+            continue;
+        }
+        const term = try sema.analyzeArithmetic(block, .mul, column, scale, src, src, src, true);
         sum = if (sum == .none) term else try sema.analyzeArithmetic(block, .add, sum, term, src, src, src, true);
     }
     return sum;
 }
 
-/// The dot product of two vectors, summed in element order.
-fn vectorDot(sema: *Sema, block: *Block, src: LazySrcLoc, a: Air.Inst.Ref, b: Air.Inst.Ref) CompileError!Air.Inst.Ref {
+/// The dot product of two vectors, summed in element order. With `fuse`,
+/// each product after the first is fused into the running sum.
+fn vectorDot(sema: *Sema, block: *Block, src: LazySrcLoc, a: Air.Inst.Ref, b: Air.Inst.Ref, fuse: bool) CompileError!Air.Inst.Ref {
     const pt = sema.pt;
     const zcu = pt.zcu;
+    if (fuse) {
+        const a0 = try sema.elemVal(block, src, a, try pt.intRef(.usize, 0), src, false);
+        const b0 = try sema.elemVal(block, src, b, try pt.intRef(.usize, 0), src, false);
+        var sum = try sema.analyzeArithmetic(block, .mul, a0, b0, src, src, src, true);
+        for (1..sema.typeOf(a).vectorLen(zcu)) |i| {
+            const index = try pt.intRef(.usize, i);
+            const a_elem = try sema.elemVal(block, src, a, index, src, false);
+            const b_elem = try sema.elemVal(block, src, b, index, src, false);
+            sum = try sema.fusedMulAdd(block, src, a_elem, b_elem, sum);
+        }
+        return sum;
+    }
     const product = try sema.analyzeArithmetic(block, .mul, a, b, src, src, src, true);
     var sum = try sema.elemVal(block, src, product, try pt.intRef(.usize, 0), src, false);
     for (1..sema.typeOf(a).vectorLen(zcu)) |i| {
@@ -15511,6 +15532,54 @@ fn vectorDot(sema: *Sema, block: *Block, src: LazySrcLoc, a: Air.Inst.Ref, b: Ai
         sum = try sema.analyzeArithmetic(block, .add, sum, elem, src, src, src, true);
     }
     return sum;
+}
+
+/// Whether a matrix product in `elem_ty` fuses its multiplies into its sums:
+/// where `elem_ty` has at most `std.float_options.fuse_mul_add_bits` bits.
+/// Only in strict float mode, as optimized float mode already lets the
+/// backend fuse, and not on SPIR-V, where the driver decides.
+fn matrixFusesMulAdd(sema: *Sema, block: *Block, src: LazySrcLoc, elem_ty: Type) CompileError!bool {
+    const pt = sema.pt;
+    const zcu = pt.zcu;
+    const comp = zcu.comp;
+    const ip = &zcu.intern_pool;
+    const target = zcu.getTarget();
+    if (block.float_mode == .optimized or target.cpu.arch.isSpirv()) return false;
+
+    const std_file_index = zcu.module_roots.get(zcu.std_mod).?.unwrap().?;
+    try sema.declareDependency(.{ .source_file = std_file_index });
+    try pt.ensureFilePopulated(std_file_index);
+    const std_ty: Type = .fromInterned(zcu.fileRootType(std_file_index));
+    const options_name = try ip.getOrPutString(comp.gpa, comp.io, pt.tid, "float_options", .no_embedded_nulls);
+    const options = try sema.namespaceLookupVal(block, src, std_ty.getNamespaceIndex(zcu), options_name) orelse return false;
+    const bits_name = try ip.getOrPutString(comp.gpa, comp.io, pt.tid, "fuse_mul_add_bits", .no_embedded_nulls);
+    const bits = try sema.fieldVal(block, src, options, bits_name, src);
+    return elem_ty.floatBits(target) <= sema.resolveValue(bits).?.toUnsignedInt(zcu);
+}
+
+/// `a * b + c` rounded once, as `@mulAdd` computes it.
+fn fusedMulAdd(sema: *Sema, block: *Block, src: LazySrcLoc, a: Air.Inst.Ref, b: Air.Inst.Ref, c: Air.Inst.Ref) CompileError!Air.Inst.Ref {
+    const pt = sema.pt;
+    const zcu = pt.zcu;
+    const ty = sema.typeOf(c);
+    const maybe_a = sema.resolveValue(a);
+    const maybe_b = sema.resolveValue(b);
+    const maybe_c = sema.resolveValue(c);
+    if (maybe_a != null and maybe_b != null and maybe_c != null) {
+        const a_val = maybe_a.?;
+        const b_val = maybe_b.?;
+        const c_val = maybe_c.?;
+        if (a_val.isUndef(zcu) or b_val.isUndef(zcu) or c_val.isUndef(zcu)) return pt.undefRef(ty);
+        return .fromValue(try Value.mulAdd(ty, a_val, b_val, c_val, sema.arena, pt));
+    }
+    try sema.requireRuntimeBlock(block, src, null);
+    return block.addInst(.{
+        .tag = .mul_add,
+        .data = .{ .pl_op = .{
+            .operand = c,
+            .payload = try sema.addExtra(Air.Bin{ .lhs = a, .rhs = b }),
+        } },
+    });
 }
 
 /// `scalar` in every element of `vector_ty`.
