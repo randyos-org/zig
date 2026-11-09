@@ -149,7 +149,7 @@ comptime {
         _ = @import("compiler_rt/stack_probe.zig");
 
         // macOS has these functions inside libSystem.
-        if (builtin.cpu.arch.isAARCH64() and !builtin.os.tag.isDarwin()) {
+        if (builtin.cpu.arch.isAarch64() and !builtin.os.tag.isDarwin()) {
             if (builtin.zig_backend != .stage2_aarch64) _ = @import("compiler_rt/aarch64_outline_atomics.zig");
         }
 
@@ -166,7 +166,7 @@ comptime {
     }
 
     _ = @import("compiler_rt/elf.zig");
-    _ = @import("compiler_rt/fmv.zig");
+    if (!ofmt_c) _ = @import("compiler_rt/fmv.zig");
 
     // Temporarily used for uefi until https://github.com/ziglang/zig/issues/21630 is addressed.
     if (!builtin.link_libc and (builtin.os.tag == .windows or builtin.os.tag == .uefi) and (builtin.abi == .none or builtin.abi == .msvc)) {
@@ -258,7 +258,7 @@ pub const want_windows_x86_msvc_abi = e: {
     break :e !builtin.link_libc;
 };
 
-pub const want_ppc_abi = builtin.cpu.arch.isPowerPC();
+pub const want_ppc_abi = builtin.cpu.arch.isPowerpc();
 
 pub const want_float_exceptions = !builtin.cpu.arch.isWasm();
 
@@ -332,7 +332,7 @@ pub const @"f80" = switch (std.zig.target.compilerRtFloatAbi(&builtin.target, 80
     .hard => hardFloatAbi(f80),
     .soft => struct {
         pub const Abi = extern struct { mantissa: u64, exponent: u16 };
-        const Repr = packed struct { mantissa: u64, exponent: u16 };
+        const Repr = bitpack struct { mantissa: u64, exponent: u16 };
         pub inline fn toAbi(raw: f80) Abi {
             const repr: Repr = @bitCast(raw);
             return .{ .mantissa = repr.mantissa, .exponent = repr.exponent };
@@ -351,7 +351,7 @@ pub const @"f128" = switch (std.zig.target.compilerRtFloatAbi(&builtin.target, 1
             .big => extern struct { hi: u64, lo: u64 },
             .little => extern struct { lo: u64, hi: u64 },
         };
-        const Repr = packed struct { lo: u64, hi: u64 };
+        const Repr = bitpack struct { lo: u64, hi: u64 };
         pub inline fn toAbi(raw: f128) Abi {
             const repr: Repr = @bitCast(raw);
             return .{ .lo = repr.lo, .hi = repr.hi };

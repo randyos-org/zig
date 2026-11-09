@@ -585,7 +585,7 @@ fn Custom(
         /// Not using the equality function means we don't have to read into
         /// the entries array, likely avoiding a cache miss and a potentially
         /// costly function call.
-        const Metadata = packed struct {
+        const Metadata = bitpack struct {
             const FingerPrint = u7;
 
             const free: FingerPrint = 0;
@@ -722,10 +722,6 @@ fn Custom(
         /// Undoes one call to `lockPointers`.
         pub fn unlockPointers(self: *Self) void {
             self.pointer_stability.unlockShared();
-        }
-
-        fn isUnderMaxLoadPercentage(size: Size, cap: Size) bool {
-            return size * 100 < max_load_percentage * cap;
         }
 
         pub fn deinit(self: *Self, allocator: Allocator) void {

@@ -149,6 +149,30 @@ test "@intFromFloat > 128 bits" {
     try testIntFromFloat(f128, -1 << 100, i200, -1 << 100);
 }
 
+test "@intFromFloat f16 to 128 bits" {
+    if (builtin.cpu.arch.isSpirv()) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_riscv64) return error.SkipZigTest;
+
+    try testIntFromFloat(f16, 0, i128, 0);
+    try testIntFromFloat(f16, -0.0, i128, 0);
+    try testIntFromFloat(f16, 1.5, i128, 1);
+    try testIntFromFloat(f16, -1.5, i128, -1);
+    try testIntFromFloat(f16, 0x1p-24, i128, 0);
+    try testIntFromFloat(f16, 65504, i128, 65504);
+    try testIntFromFloat(f16, -65504, i128, -65504);
+    try testIntFromFloat(f16, 0, u128, 0);
+    try testIntFromFloat(f16, 1.5, u128, 1);
+    try testIntFromFloat(f16, 65504, u128, 65504);
+
+    var v: @Vector(4, f16) = .{ 0, 1.5, -65504, 65504 };
+    _ = &v;
+    const w: @Vector(4, i128) = @intFromFloat(v);
+    try expectEqual(@Vector(4, i128){ 0, 1, -65504, 65504 }, w);
+}
+
 fn testFloatFromInt(comptime I: type, i: I, comptime F: type, expected: F) !void {
     try expect(@as(F, @floatFromInt(i)) == expected);
 }
@@ -767,7 +791,6 @@ test "@intCast on vector" {
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_riscv64) return error.SkipZigTest;
     if (builtin.cpu.arch.isSpirv()) return error.SkipZigTest;
-    if (builtin.zig_backend == .stage2_llvm and builtin.cpu.arch == .hexagon) return error.SkipZigTest;
 
     const S = struct {
         fn doTheTest() !void {
@@ -977,6 +1000,34 @@ test "@intCast on vector" {
                     }));
                 }
             }
+        }
+    };
+
+    try S.doTheTest();
+    try comptime S.doTheTest();
+}
+
+test "@intCast signed vector to narrower unsigned vector" {
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_riscv64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_spirv) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_llvm and builtin.cpu.arch == .hexagon) return error.SkipZigTest;
+
+    const S = struct {
+        fn doTheTest() !void {
+            var x16: @Vector(4, i16) = .{ 0x00, 0x7f, 0x80, 0xff };
+            var x32: @Vector(4, i32) = .{ 0x00, 0x7f, 0x80, 0xff };
+            var x64: @Vector(4, i64) = .{ 0x00, 0x7fff_ffff, 0x8000_0000, 0xffff_ffff };
+
+            const y16: @Vector(4, u8) = @intCast(@as(*volatile @Vector(4, i16), &x16).*);
+            const y32: @Vector(4, u8) = @intCast(@as(*volatile @Vector(4, i32), &x32).*);
+            const y64: @Vector(4, u32) = @intCast(@as(*volatile @Vector(4, i64), &x64).*);
+
+            try expect(mem.eql(u8, &@as([4]u8, y16), &[4]u8{ 0x00, 0x7f, 0x80, 0xff }));
+            try expect(mem.eql(u8, &@as([4]u8, y32), &[4]u8{ 0x00, 0x7f, 0x80, 0xff }));
+            try expect(mem.eql(u32, &@as([4]u32, y64), &[4]u32{ 0x00, 0x7fff_ffff, 0x8000_0000, 0xffff_ffff }));
         }
     };
 
@@ -1895,10 +1946,10 @@ test "cast typed undefined to int" {
 //     try expect(c.ptr == a.ptr);
 // }
 
-test "bitcast packed struct with u0" {
+test "bitcast bitpack struct with u0" {
     if (builtin.cpu.arch.isSpirv() and builtin.zig_backend == .stage2_llvm) return error.SkipZigTest;
 
-    const S = packed struct(u2) { a: u0, b: u2 };
+    const S = bitpack struct(u2) { a: u0, b: u2 };
     const s = @as(S, @bitCast(@as(u2, 2)));
     try expect(s.a == 0);
     try expect(s.b == 2);
@@ -3057,7 +3108,6 @@ test "@intCast vector of signed integer" {
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_riscv64) return error.SkipZigTest;
-    if (builtin.zig_backend == .stage2_llvm and builtin.cpu.arch == .hexagon) return error.SkipZigTest;
 
     var x: @Vector(4, i32) = .{ 1, 2, 3, 4 };
     _ = &x;

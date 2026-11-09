@@ -112,7 +112,7 @@ pub fn dump(d: *Objdump) Objdump.Error!void {
                 error.EndOfStream => try d.warn("failed to read phdrs: unexpected eof", .{}),
                 else => |e| return e,
             };
-            if (d.opts.symbols) {
+            if (d.opts.symbols or d.opts.dyn_syms) {
                 try dumpSymbols(d, sections);
             }
             if (d.opts.symbol_versions) {
@@ -221,7 +221,7 @@ fn scanSections(
         const shdr = try r.peekStruct(ElfN.Shdr, endian);
         try r.discardAll64(ehdr.shentsize);
         section.* = .{
-            .name = try std.fmt.allocPrint(arena, "(section {d})", .{shndx}),
+            .name = try arena.print("(section {d})", .{shndx}),
             .name_offset = shdr.name,
             .type = shdr.type,
             .flags = shdr.flags.shf,
@@ -1411,11 +1411,19 @@ fn dumpSymbols(
 ) Objdump.Error!void {
     const w = d.w;
 
+    assert(d.opts.symbols or d.opts.dyn_syms);
+
     for (sections) |symtab_section| {
         const symbols = switch (symtab_section.contents) {
             .symtab => |symtab| symtab,
             else => continue,
         };
+        // If only `--dyn-syms` was passed, ignore `SHT_SYMTAB` sections
+        switch (symtab_section.type) {
+            .SYMTAB => if (!d.opts.symbols) continue,
+            .DYNSYM => {},
+            else => unreachable,
+        }
 
         for (d.opts.section_filters) |filter| {
             if (std.mem.find(u8, symtab_section.name, filter) != null) break;
@@ -1434,12 +1442,13 @@ fn dumpSymbols(
             symbol_kind_str,
             symtab_section.name,
         });
-        try w.print("  {[index]s: >5}  {[type]s: <10}  {[bind]s: <10}  {[visibility]s: <10}  {[shndx]s: >5}  {[value]s: ^18}  {[size]s: ^18}  {[name]s}\n", .{
+        try w.print("  {[index]s: >5}  {[type]s: <10}  {[bind]s: <10}  {[visibility]s: <10}  {[shndx]s: >6}  {[section]s: <14} {[value]s: ^18}  {[size]s: ^18}  {[name]s}\n", .{
             .index = "index",
             .type = "type",
             .bind = "bind",
             .visibility = "visibility",
             .shndx = "shndx",
+            .section = "section",
             .value = "value",
             .size = "size",
             .name = "name",
@@ -1455,14 +1464,43 @@ fn dumpSymbols(
             } else if (d.opts.symbol_filters.len > 0) {
                 continue;
             }
-            try w.print("  {d: >5}  {s: <10}  {s: <10}  {t: <10}  {f}  {x:0>16}  {x:0>16}  {s}\n", .{
+            try w.print("  {d: >5}  {s: <10}  {s: <10}  {t: <10}  {d: >6}  {s: <14}  {x:0>16}  {x:0>16}  {s}\n", .{
                 d.fmtIntField(symbol_index, .index),
                 symbolTypeString(symbol.info.type),
                 symbolBindString(symbol.info.bind),
                 symbol.other.visibility,
                 fmtShndx(d, symbol.shndx),
-                d.fmtIntField(symbol.value, .address),
-                d.fmtIntField(symbol.size, .size),
+                switch (symbol.shndx) {
+                    std.elf.SHN_UNDEF, std.elf.SHN_COMMON, std.elf.SHN_ABS => "",
+                    else => |shndx| if (shndx < sections.len) name: {
+                        break :name sections[shndx].name[0..@min(sections[shndx].name.len, 14)];
+                    } else "",
+                },
+                // For SHN_UNDEF symbols in a dynamic symbol table, the address is usually 0, but it
+                // is significant for it to be non-zero because this causes the dynamic linker to
+                // treat the symbol as defined anyway (this is commonly used for canonical PLT
+                // entries). To allow snapshots to differentiate between these two fundamentally
+                // different cases, do not redact the value of SHN_UNDEF symbols in dynamic symbol
+                // tables if that value is zero.
+                d.fmtIntField(symbol.value, switch (symbol.shndx) {
+                    std.elf.SHN_UNDEF => kind: {
+                        if (symtab_section.type == .DYNSYM and symbol.value == 0) {
+                            break :kind null;
+                        }
+                        break :kind .address;
+                    },
+                    std.elf.SHN_COMMON, std.elf.SHN_ABS => null,
+                    else => .address,
+                }),
+                // For STT_OBJECT symbols, the symbol size is considered a part of the ABI (and will
+                // not change due to codegen or linker decisions), so don't redact it in that case.
+                d.fmtIntField(symbol.size, switch (symbol.info.bind) {
+                    .LOCAL => .size,
+                    else => switch (symbol.info.type) {
+                        .OBJECT, .COMMON => null,
+                        else => .size,
+                    },
+                }),
                 sym_name,
             });
         }
@@ -2021,11 +2059,35 @@ fn fmtShndx(d: *const Objdump, shndx: u16) FormatShndx {
 const FormatShndx = struct {
     d: *const Objdump,
     shndx: u16,
-    pub fn format(ctx: FormatShndx, w: *Io.Writer) Io.Writer.Error!void {
+    pub fn formatNumber(
+        ctx: FormatShndx,
+        w: *Io.Writer,
+        number: std.fmt.Number,
+    ) Io.Writer.Error!void {
         switch (ctx.shndx) {
-            std.elf.SHN_UNDEF => try w.writeAll("UNDEF"),
-            std.elf.SHN_ABS => try w.writeAll("  ABS"),
-            else => |shndx| try w.print("{d: >5}", .{ctx.d.fmtIntField(shndx, .index)}),
+            std.elf.SHN_UNDEF => try w.alignBuffer(
+                "UNDEF",
+                number.width orelse 0,
+                number.alignment,
+                number.fill,
+            ),
+            std.elf.SHN_ABS => try w.alignBuffer(
+                "ABS",
+                number.width orelse 0,
+                number.alignment,
+                number.fill,
+            ),
+            std.elf.SHN_COMMON => try w.alignBuffer(
+                "COMMON",
+                number.width orelse 0,
+                number.alignment,
+                number.fill,
+            ),
+            else => |shndx| try Objdump.FormatIntField.formatNumber(.{
+                .d = ctx.d,
+                .val = shndx,
+                .kind = .index,
+            }, w, number),
         }
     }
 };

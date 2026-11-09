@@ -63,6 +63,12 @@ comp: *Compilation,
 /// If the ZCU is emitting an LLVM object (i.e. we are using the LLVM backend), then this is the
 /// `LlvmObject` we are emitting to.
 llvm_object: ?LlvmObject.Ptr,
+/// The basename of the object file which will be emitted by LLVM for the ZCU. Once it is emitted,
+/// this object file is passed to the active linker implementation as an ordinary link input.
+/// Not part of `llvm_object` because that may have been destroyed by the time the linker runs.
+///
+/// For the full path, use `Compilation.resolveEmitPath` with `kind == .temp`.
+llvm_object_basename: ?[]const u8,
 
 /// Pointer to externally managed resource.
 root_mod: *Module,
@@ -1297,7 +1303,7 @@ pub const ErrorMsg = struct {
     pub fn init(gpa: Allocator, src_loc: LazySrcLoc, comptime format: []const u8, args: anytype) !ErrorMsg {
         return .{
             .src_loc = src_loc,
-            .msg = try std.fmt.allocPrint(gpa, format, args),
+            .msg = try gpa.print(format, args),
         };
     }
 
@@ -2778,7 +2784,7 @@ pub const LazySrcLoc = struct {
             /// The index of the item to point to within this case.
             item_idx: SwitchItem.Index,
 
-            pub const Index = packed struct(u32) {
+            pub const Index = bitpack struct(u32) {
                 kind: enum(u1) { single, range },
                 value: u31,
             };
@@ -2821,7 +2827,7 @@ pub const LazySrcLoc = struct {
         /// where in semantic analysis the value got set.
         pub const TracedOffset = struct {
             x: Ast.Node.Offset,
-            trace: std.debug.Trace = std.debug.Trace.init,
+            trace: if (want_tracing) std.debug.Trace else void = if (want_tracing) .init,
 
             const want_tracing = false;
         };
@@ -3014,7 +3020,21 @@ pub fn reset(zcu: *Zcu, arena: Allocator) Allocator.Error!void {
             }))
     {
         dev.check(.llvm_backend);
-        zcu.llvm_object = try .create(if (comp.config.incremental) comp.arena else arena, zcu);
+        const llvm_arena = if (comp.config.incremental) comp.arena else arena;
+        zcu.llvm_object = try .create(llvm_arena, zcu);
+
+        const target = zcu.getTarget();
+        if (comp.emit_bin != null) switch (target.ofmt) {
+            .llvmbc, .llvmir => {},
+            else => zcu.llvm_object_basename = try std.zig.binNameAlloc(llvm_arena, .{
+                .root_name = try std.fmt.allocPrint(llvm_arena, "{s}_zcu", .{comp.root_name}),
+                .cpu_arch = target.cpu.arch,
+                .os_tag = target.os.tag,
+                .ofmt = target.ofmt,
+                .abi = target.abi,
+                .output_mode = .Obj,
+            }),
+        };
     }
 }
 
@@ -4118,7 +4138,7 @@ pub fn errNote(
     comptime format: []const u8,
     args: anytype,
 ) error{OutOfMemory}!void {
-    const msg = try std.fmt.allocPrint(zcu.gpa, format, args);
+    const msg = try zcu.gpa.print(format, args);
     errdefer zcu.gpa.free(msg);
 
     parent.notes = try zcu.gpa.realloc(parent.notes, parent.notes.len + 1);
@@ -4139,7 +4159,7 @@ pub fn addGlobalAssembly(zcu: *Zcu, unit: AnalUnit, source: []const u8) !void {
     const gpa = zcu.gpa;
     const gop = try zcu.global_assembly.getOrPut(gpa, unit);
     if (gop.found_existing) {
-        const new_value = try std.fmt.allocPrint(gpa, "{s}\n{s}", .{ gop.value_ptr.*, source });
+        const new_value = try gpa.print("{s}\n{s}", .{ gop.value_ptr.*, source });
         gpa.free(gop.value_ptr.*);
         gop.value_ptr.* = new_value;
     } else {
@@ -4195,7 +4215,7 @@ pub const Feature = enum {
 };
 
 pub fn backendSupportsFeature(zcu: *const Zcu, comptime feature: Feature) bool {
-    const backend = target_util.zigBackend(&zcu.root_mod.resolved_target.result, zcu.comp.config.use_llvm);
+    const backend = std.zig.compilerBackend(&zcu.root_mod.resolved_target.result, zcu.comp.config.use_llvm);
     return target_util.backendSupportsFeature(backend, feature);
 }
 
@@ -4255,7 +4275,7 @@ pub fn atomicPtrAlignment(
     }
     if (switch (ty.zigTypeTag(zcu)) {
         .int, .@"enum" => true,
-        .@"struct" => ty.containerLayout(zcu) == .@"packed",
+        .@"struct" => ty.containerLayout(zcu) == .@"bitpack",
         else => false,
     }) {
         assert(ty.isAbiInt(zcu));
@@ -4283,14 +4303,14 @@ pub fn typeToStruct(zcu: *const Zcu, ty: Type) ?InternPool.LoadedStructType {
     };
 }
 
-pub fn typeToPackedStruct(zcu: *const Zcu, ty: Type) ?InternPool.LoadedStructType {
+pub fn typeToBitpackStruct(zcu: *const Zcu, ty: Type) ?InternPool.LoadedStructType {
     const s = zcu.typeToStruct(ty) orelse return null;
-    if (s.layout != .@"packed") return null;
+    if (s.layout != .@"bitpack") return null;
     return s;
 }
 
 /// https://github.com/ziglang/zig/issues/17178 explored storing these bit offsets
-/// into the packed struct InternPool data rather than computing this on the
+/// into the bitpack struct InternPool data rather than computing this on the
 /// fly, however it was found to perform worse when measured on real world
 /// projects.
 pub fn structPackedFieldBitOffset(
@@ -4299,7 +4319,7 @@ pub fn structPackedFieldBitOffset(
     field_index: u32,
 ) u16 {
     const ip = &zcu.intern_pool;
-    assert(struct_type.layout == .@"packed");
+    assert(struct_type.layout == .@"bitpack");
     var bit_sum: u64 = 0;
     for (0..struct_type.field_types.len) |i| {
         if (i == field_index) {
@@ -4743,7 +4763,7 @@ pub fn callconvSupported(zcu: *Zcu, cc: std.lang.CallingConvention) union(enum) 
     bad_backend: std.lang.CompilerBackend, // value is current backend
 } {
     const target = zcu.getTarget();
-    const backend = target_util.zigBackend(target, zcu.comp.config.use_llvm);
+    const backend = std.zig.compilerBackend(target, zcu.comp.config.use_llvm);
     switch (cc) {
         .auto, .@"inline" => return .ok,
         .async => return .{ .bad_backend = backend }, // nothing supports async currently

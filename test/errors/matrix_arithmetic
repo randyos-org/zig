@@ -1,0 +1,30 @@
+#zig build-obj {
+--name test -fno-emit-bin
+-Mroot=test.zig
+#}
+
+#write test.zig {
+export fn badShapes() void {
+    const a: @Matrix(2, 3, f32) = .{ .{ 1, 2 }, .{ 3, 4 }, .{ 5, 6 } };
+    _ = a * a;
+}
+export fn badVector() void {
+    const a: @Matrix(2, 3, f32) = .{ .{ 1, 2 }, .{ 3, 4 }, .{ 5, 6 } };
+    _ = a * @Vector(2, f32){ 1, 2 };
+}
+export fn badOperator() void {
+    const a: @Matrix(2, 2, f32) = .{ .{ 1, 2 }, .{ 3, 4 } };
+    _ = a / a;
+}
+export fn badCompare() void {
+    const a: @Matrix(2, 2, f32) = .{ .{ 1, 2 }, .{ 3, 4 } };
+    _ = a == a;
+}
+#}
+#update
+#check errors {
+test.zig:3:11: error: cannot multiply '@Matrix(2, 3, f32)' by '@Matrix(2, 3, f32)'
+test.zig:7:11: error: cannot multiply '@Matrix(2, 3, f32)' by '@Vector(2, f32)'
+test.zig:11:11: error: matrices support only the '+', '-' and '*' operators
+test.zig:15:11: error: matrices support only the '+', '-' and '*' operators
+#}

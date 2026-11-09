@@ -1716,9 +1716,6 @@ pub fn finish(f: *Flush, wasm: *Wasm) !void {
             },
         }
 
-        var debug_bytes = std.array_list.Managed(u8).init(gpa);
-        defer debug_bytes.deinit();
-
         try emitProducerSection(gpa, binary_bytes);
         try emitFeaturesSection(gpa, binary_bytes, target);
     }
@@ -1739,7 +1736,7 @@ pub fn finish(f: *Flush, wasm: *Wasm) !void {
 
         // TODO: pass ZCU data and symbols to write, so reparsing not needed
         if (comp.zcu != null) {
-            const name = try std.fmt.allocPrint(gpa, "{s}_zcu.o", .{comp.root_name});
+            const name = try gpa.print("{s}_zcu.o", .{comp.root_name});
             defer gpa.free(name);
             try builder.append(gpa, name, binary_bytes.items);
         }

@@ -1,0 +1,99 @@
+#zig build-obj {
+--name test -fno-emit-bin
+-target spirv32-opengl -fno-llvm
+-Mroot=test.zig
+#}
+
+#write test.zig {
+const S = extern struct { x: u32, y: u8 };
+const P = bitpack struct(u8) { a: u4, b: u4 };
+const U = extern union { a: u32, b: u8 };
+
+const storage_u8 = @extern(*addrspace(.storage_buffer) extern struct { val: u8 }, .{
+    .name = "storage_u8",
+    .decoration = .{ .descriptor = .{ .set = 0, .binding = 0 } },
+});
+
+const uniform_u16 = @extern(*addrspace(.uniform) extern struct { val: u16 }, .{
+    .name = "uniform_u16",
+    .decoration = .{ .descriptor = .{ .set = 0, .binding = 1 } },
+});
+
+const push_constant_u8 = @extern(*addrspace(.push_constant) extern struct { val: u8 }, .{
+    .name = "push_constant_u8",
+});
+
+const storage_struct = @extern(*addrspace(.storage_buffer) extern struct { val: S }, .{
+    .name = "storage_struct",
+    .decoration = .{ .descriptor = .{ .set = 0, .binding = 2 } },
+});
+
+const storage_packed = @extern(*addrspace(.storage_buffer) extern struct { val: P }, .{
+    .name = "storage_packed",
+    .decoration = .{ .descriptor = .{ .set = 0, .binding = 3 } },
+});
+
+const storage_array = @extern(*addrspace(.storage_buffer) extern struct { val: [4]u8 }, .{
+    .name = "storage_array",
+    .decoration = .{ .descriptor = .{ .set = 0, .binding = 4 } },
+});
+
+const storage_union = @extern(*addrspace(.storage_buffer) extern struct { val: U }, .{
+    .name = "storage_union",
+    .decoration = .{ .descriptor = .{ .set = 0, .binding = 5 } },
+});
+
+export fn storeU8() callconv(.kernel) void {
+    storage_u8.val = 1;
+}
+
+export fn loadU16() callconv(.kernel) void {
+    _ = uniform_u16.val;
+}
+
+export fn storePushConstantU8() callconv(.kernel) void {
+    push_constant_u8.val = 1;
+}
+
+export fn loadStruct() callconv(.kernel) void {
+    _ = storage_struct.val;
+}
+
+export fn loadPacked() callconv(.kernel) void {
+    _ = storage_packed.val;
+}
+
+export fn loadArray() callconv(.kernel) void {
+    _ = storage_array.val;
+}
+
+export fn loadUnion() callconv(.kernel) void {
+    _ = storage_union.val;
+}
+#}
+#update
+#check errors {
+test.zig:40:20: error: cannot load or store 'u8' in address space 'storage_buffer' without feature 'int8'
+test.zig:44:20: error: cannot load or store 'u16' in address space 'uniform' without feature 'int16'
+test.zig:48:26: error: cannot load or store 'u8' in address space 'push_constant' without feature 'int8'
+test.zig:52:23: error: cannot load or store 'u8' in address space 'storage_buffer' without feature 'int8'
+test.zig:56:23: error: cannot load or store 'u8' in address space 'storage_buffer' without feature 'int8'
+test.zig:60:22: error: cannot load or store 'u8' in address space 'storage_buffer' without feature 'int8'
+test.zig:64:22: error: cannot load or store 'u8' in address space 'storage_buffer' without feature 'int8'
+#}
+
+#zig build-obj {
+--name test -fno-emit-bin
+-target spirv32-vulkan -fno-llvm
+-Mroot=test.zig
+#}
+#update
+#check errors {
+test.zig:40:20: error: cannot load or store 'u8' in address space 'storage_buffer' without feature 'int8'
+test.zig:44:20: error: cannot load or store 'u16' in address space 'uniform' without feature 'int16'
+test.zig:48:26: error: cannot load or store 'u8' in address space 'push_constant' without feature 'int8'
+test.zig:52:23: error: cannot load or store 'u8' in address space 'storage_buffer' without feature 'int8'
+test.zig:56:23: error: cannot load or store 'u8' in address space 'storage_buffer' without feature 'int8'
+test.zig:60:22: error: cannot load or store 'u8' in address space 'storage_buffer' without feature 'int8'
+test.zig:64:22: error: cannot load or store 'u8' in address space 'storage_buffer' without feature 'int8'
+#}

@@ -10,7 +10,6 @@ const build_options = @import("build_options");
 const Air = @import("../Air.zig");
 const codegen = @import("../codegen.zig");
 const Compilation = @import("../Compilation.zig");
-const debugLogScopeEnabled = @import("../main.zig").debugLogScopeEnabled;
 const InternPool = @import("../InternPool.zig");
 const link = @import("../link.zig");
 const Module = @import("../Module.zig");
@@ -26,12 +25,19 @@ const iterateParamTypes = FuncGen.iterateParamTypes;
 const ccAbiPromoteInt = FuncGen.ccAbiPromoteInt;
 
 const log = std.log.scoped(.codegen);
-const bindings = if (build_options.have_llvm)
-    @import("llvm/bindings.zig")
-else
-    @compileError("LLVM unavailable");
 
 pub fn legalizeFeatures(target: *const std.Target) ?*const Air.Legalize.Features {
+    // LLVM miscompiles reductions and bitcasts of bool vectors on Hexagon, so do them one element at a time.
+    // https://github.com/llvm/llvm-project/issues/237727
+    if (target.cpu.arch == .hexagon) return comptime &.init(.{
+        .expand_int_from_float_safe = true,
+        .expand_int_from_float_optimized_safe = true,
+        .scalarize_bit_cast_array = true,
+
+        .expand_int_cast_safe = true,
+        .scalarize_bit_cast_vector_non_elementwise = true,
+        .scalarize_reduce = true,
+    });
     return switch (target.cpu.arch.endian()) {
         inline else => |endian| comptime &.init(.{
             .expand_int_from_float_safe = true,
@@ -56,7 +62,6 @@ pub fn supportsTailCall(target: *const std.Target) bool {
     };
 }
 
-// Avoid depending on `bindings.CodeModel` in the bitcode-only case.
 const CodeModel = enum {
     default,
     tiny,
@@ -66,13 +71,13 @@ const CodeModel = enum {
     large,
 };
 
-fn codeModel(model: std.lang.CodeModel, target: *const std.Target) CodeModel {
+pub fn codeModel(model: std.lang.CodeModel, target: *const std.Target) CodeModel {
     // Roughly match Clang's mapping of GCC code models to LLVM code models.
     return switch (model) {
         .default => .default,
         .extreme, .large => .large,
         .kernel => .kernel,
-        .medany => if (target.cpu.arch.isRISCV()) .medium else .large,
+        .medany => if (target.cpu.arch.isRiscv()) .medium else .large,
         .medium => .medium,
         .medmid => .medium,
         .normal, .medlow, .small => .small,
@@ -83,12 +88,6 @@ fn codeModel(model: std.lang.CodeModel, target: *const std.Target) CodeModel {
 pub const Object = struct {
     gpa: Allocator,
     builder: Builder,
-
-    /// The basename of the object file which will emitted by LLVM for the ZCU. Once it it emitted,
-    /// this object file is passed to the active linker implementation as an ordinary link input.
-    ///
-    /// For the full path, use `Compilation.resolveEmitPath` with `kind == .temp`.
-    out_bin_basename: []const u8,
 
     /// This pool contains only types (and not `@as(type, undefined)`). It has two purposes:
     ///
@@ -226,14 +225,6 @@ pub const Object = struct {
         obj.* = .{
             .gpa = gpa,
             .builder = builder,
-            .out_bin_basename = try std.zig.binNameAlloc(arena, .{
-                .root_name = try std.fmt.allocPrint(arena, "{s}_zcu", .{comp.root_name}),
-                .cpu_arch = target.cpu.arch,
-                .os_tag = target.os.tag,
-                .ofmt = target.ofmt,
-                .abi = target.abi,
-                .output_mode = .Obj,
-            }),
             .type_pool = .empty,
             .lazy_abi_aligns = .empty,
             .debug_compile_unit = debug_compile_unit,
@@ -331,23 +322,17 @@ pub const Object = struct {
         }
     }
 
-    pub const EmitOptions = struct {
-        bin_path: ?[:0]const u8,
-        asm_path: ?[:0]const u8,
-        opt_ir_path: ?[:0]const u8,
-        opt_bc_path: ?[:0]const u8,
-
-        is_debug: bool,
-        is_small: bool,
-        time_report: ?*Compilation.TimeReport,
-        sanitize_thread: bool,
-        fuzz: bool,
-        lto: std.zig.LtoMode,
+    pub const FlushOptions = struct {
+        ir_out_path: ?std.Build.Cache.Path,
+        bc_out_path: ?std.Build.Cache.Path,
+        want_bitcode: bool,
     };
-
-    pub fn emit(o: *Object, pt: Zcu.PerThread, options: EmitOptions) link.Error!void {
+    /// Returns `&.{}` if `options.want_bitcode` is `false`. Otherwise, the returned bitcode slice
+    /// is owned by the caller and is allocated using `o.zcu.comp.gpa`.
+    pub fn flush(o: *Object, pt: Zcu.PerThread, options: FlushOptions) link.Error![]const u32 {
         const zcu = o.zcu;
         const comp = zcu.comp;
+        const gpa = o.gpa;
         const io = comp.io;
         const diags = &comp.link_diags;
         const target = &comp.root_mod.resolved_target.result;
@@ -395,8 +380,8 @@ pub const Object = struct {
         }
 
         {
-            var module_flags = try std.array_list.Managed(Builder.Metadata).initCapacity(o.gpa, 11);
-            defer module_flags.deinit();
+            var module_flags: std.ArrayList(Builder.Metadata) = try .initCapacity(o.gpa, 11);
+            defer module_flags.deinit(o.gpa);
 
             const behavior_error = try o.builder.metadataConstant(try o.builder.intConst(.i32, 1));
             const behavior_warning = try o.builder.metadataConstant(try o.builder.intConst(.i32, 2));
@@ -412,7 +397,7 @@ pub const Object = struct {
             }
 
             const pic_level = target_util.picLevel(target);
-            if (comp.root_mod.pic) {
+            if (comp.config.pic) {
                 module_flags.appendAssumeCapacity(try o.builder.metadataTuple(&.{
                     behavior_min,
                     (try o.builder.metadataString("PIC Level")).toMetadata(),
@@ -509,216 +494,41 @@ pub const Object = struct {
             try o.builder.addNamedMetadata(try o.builder.string("llvm.module.flags"), module_flags.items);
         }
 
-        const target_triple_sentinel =
-            try o.gpa.dupeSentinel(u8, o.builder.target_triple.slice(&o.builder).?, 0);
-        defer o.gpa.free(target_triple_sentinel);
+        {
+            var p: Builder.Print = .{ .name = comp.root_name, .builder = &o.builder, .err = null };
+            std.log.scoped(.@"llvm-ir").debug("{f}", .{&p});
+            if (p.err) |err| return err;
+        }
 
-        const emit_asm_msg = options.asm_path orelse "(none)";
-        const emit_bin_msg = options.bin_path orelse "(none)";
-        const opt_llvm_ir_msg = options.opt_ir_path orelse "(none)";
-        const opt_llvm_bc_msg = options.opt_bc_path orelse "(none)";
-        log.debug("emit LLVM object asm={s} bin={s} ir={s} bc={s}", .{
-            emit_asm_msg, emit_bin_msg, opt_llvm_ir_msg, opt_llvm_bc_msg,
+        if (options.ir_out_path) |path| {
+            o.builder.printToFilePath(io, path.root_dir.handle, path.sub_path) catch |err| {
+                return diags.fail("failed emitting LLVM module to {qf}: {t}", .{ path, err });
+            };
+        }
+
+        if (!options.want_bitcode and options.bc_out_path == null) {
+            return &.{};
+        }
+
+        const bitcode = try o.builder.toBitcode(gpa, .{
+            .name = "zig",
+            .version = build_options.semver,
         });
-        const log_opt_llvm_ir = debugLogScopeEnabled("opt-llvm-ir");
+        errdefer gpa.free(bitcode);
 
-        const context, const module = emit: {
-            {
-                var p: Builder.Print = .{ .name = comp.root_name, .builder = &o.builder, .err = null };
-                std.log.scoped(.@"llvm-ir").debug("{f}", .{&p});
-                if (p.err) |err| return err;
-            }
-
-            if (target.ofmt == .llvmir) {
-                const path = comp.bin_file.?.emit;
-                o.builder.printToFilePath(io, path.root_dir.handle, path.sub_path) catch |err| {
-                    return diags.fail("failed emitting LLVM module to {qf}: {t}", .{ path, err });
-                };
-                return;
-            }
-
-            const bitcode = try o.builder.toBitcode(o.gpa, .{
-                .name = "zig",
-                .version = build_options.semver,
-            });
-            defer o.gpa.free(bitcode);
-
-            if (target.ofmt == .llvmbc) {
-                const path = comp.bin_file.?.emit;
-                var file = path.root_dir.handle.createFile(io, path.sub_path, .{}) catch |err|
-                    return diags.fail("failed to create {qf}: {t}", .{ path, err });
-                defer file.close(io);
-
-                file.writeStreamingAll(io, @ptrCast(bitcode)) catch |err|
-                    return diags.fail("failed to write to {qf}: {t}", .{ path, err });
-                return;
-            }
-
-            if (options.asm_path == null and options.bin_path == null and
-                options.opt_ir_path == null and options.opt_bc_path == null and
-                !log_opt_llvm_ir) return;
-
-            if (!build_options.have_llvm or !comp.config.use_lib_llvm) {
-                return diags.fail("emitting without libllvm not implemented", .{});
-            }
-
-            initializeLLVMTarget(io, target.cpu.arch);
-
-            const context: *bindings.Context = .create();
-            errdefer context.dispose();
-
-            const bitcode_memory_buffer = bindings.MemoryBuffer.createMemoryBufferWithMemoryRange(
-                @ptrCast(bitcode.ptr),
-                bitcode.len * 4,
-                "BitcodeBuffer",
-                bindings.Bool.False,
-            );
-            defer bitcode_memory_buffer.dispose();
-
-            context.enableBrokenDebugInfoCheck();
-
-            var module: *bindings.Module = undefined;
-            if (context.parseBitcodeInContext2(bitcode_memory_buffer, &module).toBool() or context.getBrokenDebugInfo()) {
-                return diags.fail("Failed to parse bitcode", .{});
-            }
-            break :emit .{ context, module };
-        };
-        defer context.dispose();
-
-        var llvm_target: *bindings.Target = undefined;
-        var error_message: [*:0]const u8 = undefined;
-        if (bindings.Target.getFromTriple(target_triple_sentinel, &llvm_target, &error_message).toBool()) {
-            defer bindings.disposeMessage(error_message);
-            return diags.fail("LLVM failed to parse '{s}': {s}", .{ target_triple_sentinel, error_message });
+        if (options.bc_out_path) |path| {
+            var file = path.root_dir.handle.createFile(io, path.sub_path, .{}) catch |err|
+                return diags.fail("failed to create {qf}: {t}", .{ path, err });
+            defer file.close(io);
+            file.writeStreamingAll(io, @ptrCast(bitcode)) catch |err|
+                return diags.fail("failed to write to {qf}: {t}", .{ path, err });
         }
 
-        const optimize_mode = comp.root_mod.optimize_mode;
-
-        const opt_level: bindings.CodeGenOptLevel = if (optimize_mode == .debug)
-            .None
-        else
-            .Aggressive;
-
-        const reloc_mode: bindings.RelocMode = if (comp.root_mod.pic)
-            .PIC
-        else if (comp.config.link_mode == .dynamic)
-            bindings.RelocMode.DynamicNoPIC
-        else
-            .Static;
-
-        const code_model: bindings.CodeModel = switch (codeModel(comp.root_mod.code_model, target)) {
-            .default => .Default,
-            .tiny => .Tiny,
-            .small => .Small,
-            .kernel => .Kernel,
-            .medium => .Medium,
-            .large => .Large,
-        };
-
-        var target_machine = bindings.TargetMachine.create(
-            llvm_target,
-            target_triple_sentinel,
-            if (target.cpu.model.llvm_name) |s| s.ptr else null,
-            comp.root_mod.llvm_cpu_features.?,
-            opt_level,
-            reloc_mode,
-            code_model,
-            comp.config.function_sections,
-            comp.config.data_sections,
-            switch (target.abi.float()) {
-                .hard => .Hard,
-                .soft => .Soft,
-            },
-            if (target_util.llvmMachineAbi(target)) |s| s.ptr else null,
-            target_util.useEmulatedTls(target),
-        );
-        errdefer target_machine.dispose();
-
-        if (comp.llvm_opt_bisect_limit >= 0) {
-            context.setOptBisectLimit(comp.llvm_opt_bisect_limit);
-        }
-
-        // Unfortunately, LLVM shits the bed when we ask for both binary and assembly.
-        // So we call the entire pipeline multiple times if this is requested.
-        var time_report_c_str: ?[*:0]u8 = null;
-        defer if (time_report_c_str) |time_report| bindings.disposeMessage(time_report);
-        var llvm_ir_c_str: ?[*:0]u8 = null;
-        defer if (llvm_ir_c_str) |llvm_ir| bindings.disposeMessage(llvm_ir);
-        var lowered_options: bindings.TargetMachine.EmitOptions = .{
-            .is_debug = options.is_debug,
-            .is_small = options.is_small,
-            .time_report_out = null, // set below to make sure it's only set for a single `emitToFile`
-            .tsan = options.sanitize_thread,
-            .lto = switch (options.lto) {
-                .none => .None,
-                .thin => .ThinPreLink,
-                .full => .FullPreLink,
-            },
-            .allow_fast_isel = true,
-            // LLVM's RISC-V backend for some reason enables the machine outliner by default even
-            // though it's clearly not ready and produces multiple miscompilations in our std tests.
-            .allow_machine_outliner = !target.cpu.arch.isRISCV(),
-            .asm_filename = null,
-            .bin_filename = if (options.bin_path) |x| x.ptr else null,
-            .llvm_ir_filename = if (options.opt_ir_path) |x| x.ptr else null,
-            .bitcode_filename = if (options.opt_bc_path) |x| x.ptr else null,
-            .llvm_ir_out = if (log_opt_llvm_ir) &llvm_ir_c_str else null,
-
-            // `.coverage` value is only used when `.sancov` is enabled.
-            .sancov = options.fuzz or comp.config.san_cov_trace_pc_guard,
-            .coverage = .{
-                .CoverageType = .Edge,
-                // Works in tandem with Inline8bitCounters or InlineBoolFlag.
-                // Zig does not yet implement its own version of this but it
-                // needs to for better fuzzing logic.
-                .IndirectCalls = false,
-                .TraceBB = false,
-                .TraceCmp = false,
-                .TraceDiv = false,
-                .TraceGep = false,
-                .Use8bitCounters = false,
-                .TracePC = false,
-                .TracePCGuard = comp.config.san_cov_trace_pc_guard,
-                // Zig emits its own inline 8-bit counters instrumentation.
-                .Inline8bitCounters = false,
-                .InlineBoolFlag = false,
-                // Zig emits its own PC table instrumentation.
-                .PCTable = false,
-                .NoPrune = false,
-                // Workaround for https://github.com/llvm/llvm-project/pull/106464
-                .StackDepth = true,
-                .TraceLoads = false,
-                .TraceStores = false,
-                .CollectControlFlow = false,
-            },
-        };
-        if (options.asm_path != null and options.bin_path != null) {
-            if (target_machine.emitToFile(module, &error_message, &lowered_options)) {
-                return diags.fail("LLVM failed to emit bin={s} ir={s}: {s}", .{
-                    emit_bin_msg, opt_llvm_ir_msg, error_message,
-                });
-            }
-            lowered_options.bin_filename = null;
-            lowered_options.llvm_ir_filename = null;
-            lowered_options.bitcode_filename = null;
-            lowered_options.llvm_ir_out = null;
-        }
-        if (options.time_report) |_| lowered_options.time_report_out = &time_report_c_str;
-        lowered_options.asm_filename = if (options.asm_path) |x| x.ptr else null;
-        if (target_machine.emitToFile(module, &error_message, &lowered_options)) {
-            defer bindings.disposeMessage(error_message);
-            return diags.fail("LLVM failed to emit asm={s} bin={s} ir={s} bc={s}: {s}", .{
-                emit_asm_msg, emit_bin_msg, opt_llvm_ir_msg, opt_llvm_bc_msg, error_message,
-            });
-        }
-        if (log_opt_llvm_ir) std.log.scoped(.@"opt-llvm-ir").debug("{s}", .{
-            llvm_ir_c_str orelse return error.OutOfMemory,
-        });
-        if (options.time_report) |time_report| {
-            assert(time_report.llvm_pass_timings.len == 0);
-            time_report.llvm_pass_timings = try comp.gpa.dupe(u8, std.mem.span(
-                time_report_c_str orelse return error.OutOfMemory,
-            ));
+        if (options.want_bitcode) {
+            return bitcode;
+        } else {
+            gpa.free(bitcode);
+            return &.{};
         }
     }
 
@@ -1825,14 +1635,14 @@ pub const Object = struct {
                 defer fields.deinit(gpa);
 
                 switch (struct_type.layout) {
-                    .@"packed" => {
+                    .@"bitpack" => {
                         try fields.ensureTotalCapacityPrecise(gpa, 1);
                         fields.appendAssumeCapacity(try o.builder.debugMemberType(
                             try o.builder.metadataString("bits"),
                             null, // file
                             ty_fwd_ref,
                             0, // line
-                            try o.getDebugType(pt, .fromInterned(struct_type.packed_backing_int_type)),
+                            try o.getDebugType(pt, .fromInterned(struct_type.bitpack_backing_int_type)),
                             ty.abiSize(zcu) * 8,
                             ty.abiAlignment(zcu).toByteUnits().? * 8,
                             0, // offset
@@ -1896,13 +1706,13 @@ pub const Object = struct {
 
                 const enum_tag_ty: Type = .fromInterned(union_type.enum_tag_type);
 
-                if (union_type.layout == .@"packed") {
+                if (union_type.layout == .@"bitpack") {
                     const bitpack_field = try o.builder.debugMemberType(
                         try o.builder.metadataString("bits"),
                         null, // file
                         ty_fwd_ref,
                         0, // line
-                        try o.getDebugType(pt, .fromInterned(union_type.packed_backing_int_type)),
+                        try o.getDebugType(pt, .fromInterned(union_type.bitpack_backing_int_type)),
                         ty.abiSize(zcu) * 8,
                         ty.abiAlignment(zcu).toByteUnits().? * 8,
                         0, // offset
@@ -2646,6 +2456,21 @@ pub const Object = struct {
         return layout;
     }
 
+    pub fn structType(o: *Object, fields: []const Builder.Type) Allocator.Error!Builder.Type {
+        const kind: Builder.Type.Structure.Kind = kind: {
+            var offset: u64 = 0;
+            var struct_align: Builder.Alignment = .fromByteUnits(1);
+            for (fields) |field| {
+                const field_align = field.alignment(.abi, &o.builder);
+                if (!field_align.check(offset)) break :kind .@"bitpack";
+                struct_align = struct_align.max(field_align);
+                offset += field.allocSize(&o.builder).fixed;
+            }
+            break :kind if (struct_align.check(offset)) .normal else .@"bitpack";
+        };
+        return o.builder.structType(kind, fields);
+    }
+
     pub fn lowerType(o: *Object, t: Type, repr: TypeRepr) Allocator.Error!Builder.Type {
         const zcu = o.zcu;
         const target = zcu.getTarget();
@@ -2830,7 +2655,7 @@ pub const Object = struct {
                         fields[2] = try o.builder.arrayType(padding_len, .i8);
                         fields_len = 3;
                     }
-                    return o.builder.structType(.normal, fields[0..fields_len]);
+                    return o.structType(fields[0..fields_len]);
                 },
                 .anyframe_type => @panic("TODO implement lowerType for AnyFrame types"),
                 .error_union_type => |error_union_type| {
@@ -2875,14 +2700,14 @@ pub const Object = struct {
                         fields[2] = try o.builder.arrayType(padding_len, .i8);
                         fields_len = 3;
                     }
-                    return o.builder.structType(.normal, fields[0..fields_len]);
+                    return o.structType(fields[0..fields_len]);
                 },
                 .simple_type => unreachable,
                 .struct_type => {
                     const struct_type = ip.loadStructType(t.toIntern());
 
-                    if (struct_type.layout == .@"packed") {
-                        return o.lowerType(.fromInterned(struct_type.packed_backing_int_type), repr);
+                    if (struct_type.layout == .@"bitpack") {
+                        return o.lowerType(.fromInterned(struct_type.bitpack_backing_int_type), repr);
                     }
 
                     if (o.type_map.get(t.toIntern())) |value| return value;
@@ -2898,20 +2723,13 @@ pub const Object = struct {
 
                     comptime assert(struct_layout_version == 2);
                     var offset: u64 = 0;
-                    var struct_kind: Builder.Type.Structure.Kind = .normal;
                     // When we encounter a zero-bit field, we place it here so we know to map it to the next non-zero-bit field (if any).
                     var it = struct_type.iterateRuntimeOrder(ip);
-                    var max_field_ty_align: InternPool.Alignment = .@"1";
                     while (it.next()) |field_index| {
                         const field_ty = Type.fromInterned(struct_type.field_types.get(ip)[field_index]);
-                        const field_ty_align = field_ty.abiAlignment(zcu);
-                        max_field_ty_align = max_field_ty_align.maxStrict(field_ty_align);
 
                         const prev_offset = offset;
                         offset = struct_type.field_offsets.get(ip)[field_index];
-                        if (@ctz(offset) < field_ty_align.toLog2Units()) {
-                            struct_kind = .@"packed"; // prevent unexpected padding before this field
-                        }
 
                         const padding_len = offset - prev_offset;
                         if (padding_len > 0) try llvm_field_types.append(
@@ -2937,9 +2755,6 @@ pub const Object = struct {
                             o.gpa,
                             try o.builder.arrayType(padding_len, .i8),
                         );
-                        if (struct_type.alignment.compareStrict(.lt, max_field_ty_align)) {
-                            struct_kind = .@"packed"; // prevent wrong alignment
-                        }
                     }
 
                     const ty = try o.builder.opaqueType(try o.builder.string(t.containerTypeName(ip).fqn.toSlice(ip)));
@@ -2947,7 +2762,7 @@ pub const Object = struct {
 
                     o.builder.namedTypeSetBody(
                         ty,
-                        try o.builder.structType(struct_kind, llvm_field_types.items),
+                        try o.structType(llvm_field_types.items),
                     );
                     return ty;
                 },
@@ -2995,13 +2810,13 @@ pub const Object = struct {
                         );
                     }
                     assert(offset > 0);
-                    return o.builder.structType(.normal, llvm_field_types.items);
+                    return o.structType(llvm_field_types.items);
                 },
                 .union_type => {
                     const union_obj = ip.loadUnionType(t.toIntern());
 
-                    if (union_obj.layout == .@"packed") {
-                        return o.lowerType(.fromInterned(union_obj.packed_backing_int_type), repr);
+                    if (union_obj.layout == .@"bitpack") {
+                        return o.lowerType(.fromInterned(union_obj.bitpack_backing_int_type), repr);
                     }
 
                     const layout = Type.getUnionLayout(union_obj, zcu);
@@ -3017,14 +2832,6 @@ pub const Object = struct {
                     const aligned_field_ty = Type.fromInterned(union_obj.field_types.get(ip)[layout.most_aligned_field]);
                     const aligned_field_llvm_ty = try o.lowerType(aligned_field_ty, repr);
 
-                    const struct_kind: Builder.Type.Structure.Kind = for (union_obj.field_types.get(ip)) |field_ty_ip| {
-                        const field_ty = Type.fromInterned(field_ty_ip);
-                        if (!field_ty.hasRuntimeBits(zcu)) continue;
-                        if (layout.payload_align.compareStrict(.lt, field_ty.abiAlignment(zcu))) {
-                            break .@"packed"; // prevent wrong alignment
-                        }
-                    } else .normal;
-
                     const payload_ty = ty: {
                         const padding_len = if (layout.tag_size == 0)
                             layout.abi_size - layout.most_aligned_field_size
@@ -3033,7 +2840,7 @@ pub const Object = struct {
                         if (padding_len == 0) {
                             break :ty aligned_field_llvm_ty;
                         }
-                        break :ty try o.builder.structType(.@"packed", &.{
+                        break :ty try o.builder.structType(.@"bitpack", &.{
                             aligned_field_llvm_ty,
                             try o.builder.arrayType(padding_len, .i8),
                         });
@@ -3045,7 +2852,7 @@ pub const Object = struct {
 
                         o.builder.namedTypeSetBody(
                             ty,
-                            try o.builder.structType(struct_kind, &.{payload_ty}),
+                            try o.structType(&.{payload_ty}),
                         );
                         return ty;
                     }
@@ -3073,7 +2880,7 @@ pub const Object = struct {
 
                     o.builder.namedTypeSetBody(
                         ty,
-                        try o.builder.structType(struct_kind, llvm_fields[0..llvm_fields_len]),
+                        try o.structType(llvm_fields[0..llvm_fields_len]),
                     );
                     return ty;
                 },
@@ -3101,7 +2908,7 @@ pub const Object = struct {
                 .opt,
                 .aggregate,
                 .un,
-                .bitpack,
+                .@"bitpack",
                 // memoization, not types
                 .memoized_call,
                 => unreachable,
@@ -3370,10 +3177,10 @@ pub const Object = struct {
                     fields[2] = llvm_ty_fields[2];
                     vals[2] = try o.builder.undefConst(fields[2]);
                 }
-                return o.builder.structConst(try o.builder.structType(
-                    llvm_ty.structKind(&o.builder),
-                    fields[0..llvm_ty_fields.len],
-                ), vals[0..llvm_ty_fields.len]);
+                return o.builder.structConst(
+                    try o.structType(fields[0..llvm_ty_fields.len]),
+                    vals[0..llvm_ty_fields.len],
+                );
             },
             .enum_tag => |enum_tag| o.lowerValue(enum_tag.int, repr),
             .float => switch (ty.floatBits(target)) {
@@ -3425,12 +3232,12 @@ pub const Object = struct {
                     fields[2] = llvm_ty_fields[2];
                     vals[2] = try o.builder.undefConst(fields[2]);
                 }
-                return o.builder.structConst(try o.builder.structType(
-                    llvm_ty.structKind(&o.builder),
-                    fields[0..llvm_ty_fields.len],
-                ), vals[0..llvm_ty_fields.len]);
+                return o.builder.structConst(
+                    try o.structType(fields[0..llvm_ty_fields.len]),
+                    vals[0..llvm_ty_fields.len],
+                );
             },
-            .bitpack => |bitpack| return o.lowerValue(bitpack.backing_int_val, repr),
+            .@"bitpack" => |@"bitpack"| return o.lowerValue(@"bitpack".backing_int_val, repr),
             .aggregate => |aggregate| switch (ip.indexToKey(ty.toIntern())) {
                 .array_type => |array_type| switch (aggregate.storage) {
                     .bytes => |bytes| try o.builder.stringConst(try o.builder.string(
@@ -3460,7 +3267,7 @@ pub const Object = struct {
                             if (result_field.* != elem_ty) need_unnamed = true;
                         }
                         return if (need_unnamed) try o.builder.structConst(
-                            try o.builder.structType(.normal, fields),
+                            try o.structType(fields),
                             vals,
                         ) else try o.builder.arrayConst(array_ty, vals);
                     },
@@ -3494,7 +3301,7 @@ pub const Object = struct {
                         }
 
                         return if (need_unnamed) try o.builder.structConst(
-                            try o.builder.structType(.@"packed", fields),
+                            try o.builder.structType(.@"bitpack", fields),
                             vals,
                         ) else try o.builder.arrayConst(array_ty, vals);
                     },
@@ -3620,14 +3427,14 @@ pub const Object = struct {
                     assert(llvm_index == llvm_len);
 
                     return o.builder.structConst(if (need_unnamed)
-                        try o.builder.structType(struct_ty.structKind(&o.builder), fields)
+                        try o.structType(fields)
                     else
                         struct_ty, vals);
                 },
                 .struct_type => {
                     const struct_type = ip.loadStructType(ty.toIntern());
                     const struct_ty = try o.lowerType(ty, repr);
-                    assert(struct_type.layout != .@"packed");
+                    assert(struct_type.layout != .@"bitpack");
                     const llvm_len = struct_ty.aggregateLen(&o.builder);
 
                     const ExpectedContents = extern struct {
@@ -3694,7 +3501,7 @@ pub const Object = struct {
                     assert(llvm_index == llvm_len);
 
                     return o.builder.structConst(if (need_unnamed)
-                        try o.builder.structType(struct_ty.structKind(&o.builder), fields)
+                        try o.structType(fields)
                     else
                         struct_ty, vals);
                 },
@@ -3707,7 +3514,7 @@ pub const Object = struct {
 
                 const union_obj = zcu.typeToUnion(ty).?;
                 const container_layout = union_obj.layout;
-                assert(container_layout != .@"packed");
+                assert(container_layout != .@"bitpack");
 
                 var need_unnamed = false;
                 const payload = if (un.tag != .none) p: {
@@ -3736,7 +3543,7 @@ pub const Object = struct {
                     if (padding_len == 0) break :p payload;
                     const padding_ty = try o.builder.arrayType(padding_len, .i8);
                     break :p try o.builder.structConst(
-                        try o.builder.structType(.@"packed", &.{ payload_ty, padding_ty }),
+                        try o.builder.structType(.@"bitpack", &.{ payload_ty, padding_ty }),
                         &.{ payload, try o.builder.undefConst(padding_ty) },
                     );
                 } else p: {
@@ -3748,7 +3555,7 @@ pub const Object = struct {
 
                 const payload_ty = payload.typeOf(&o.builder);
                 if (layout.tag_size == 0) return o.builder.structConst(if (need_unnamed)
-                    try o.builder.structType(union_ty.structKind(&o.builder), &.{payload_ty})
+                    try o.structType(&.{payload_ty})
                 else
                     union_ty, &.{payload});
                 const tag = try o.lowerValue(un.tag, repr);
@@ -3769,7 +3576,7 @@ pub const Object = struct {
                     len = 3;
                 }
                 return o.builder.structConst(if (need_unnamed)
-                    try o.builder.structType(union_ty.structKind(&o.builder), fields[0..len])
+                    try o.structType(fields[0..len])
                 else
                     union_ty, vals[0..len]);
             },
@@ -3811,7 +3618,7 @@ pub const Object = struct {
         });
         const llvm_field_types = llvm_field_types_buf[0..f80_layout.llvm_fields_len];
         const f80_llvm_ty = try o.builder.structType(.normal, llvm_field_types);
-        const f80_repr: packed struct { mantissa: u64, exponent: u16 } = @bitCast(val);
+        const f80_repr: bitpack struct { mantissa: u64, exponent: u16 } = @bitCast(val);
         var llvm_field_vals_buf: [5]Builder.Constant = undefined;
         const llvm_field_vals = llvm_field_vals_buf[0..f80_layout.llvm_fields_len];
         for (
@@ -3840,7 +3647,7 @@ pub const Object = struct {
         });
         const llvm_field_types = llvm_field_types_buf[0..f128_layout.llvm_fields_len];
         const f128_llvm_ty = try o.builder.structType(.normal, llvm_field_types);
-        const f128_repr: packed struct { lo: u64, hi: u64 } = @bitCast(val);
+        const f128_repr: bitpack struct { lo: u64, hi: u64 } = @bitCast(val);
         var llvm_field_vals_buf: [5]Builder.Constant = undefined;
         const llvm_field_vals = llvm_field_vals_buf[0..f128_layout.llvm_fields_len];
         for (
@@ -3940,7 +3747,7 @@ pub const Object = struct {
                     },
                     .@"struct", .@"union" => switch (agg_ty.containerLayout(zcu)) {
                         .auto => agg_ty.structFieldOffset(@intCast(field.index), zcu),
-                        .@"extern", .@"packed" => unreachable,
+                        .@"extern", .@"bitpack" => unreachable,
                     },
                     else => unreachable,
                 };
@@ -4632,212 +4439,3 @@ const struct_layout_version = 2;
 // TODO: Restore the non_null field to i1 once
 //       https://github.com/llvm/llvm-project/issues/56585/ is fixed
 pub const optional_layout_version = 3;
-
-var target_registry_mutex: std.Io.Mutex = .init;
-
-pub fn initializeLLVMTarget(io: Io, arch: std.Target.Cpu.Arch) void {
-    // Repeated initialization is safe, as targets which have already been registered will be skipped.
-    // It is however the client's responsibility to synchronize registry access.
-    target_registry_mutex.lockUncancelable(io);
-    defer target_registry_mutex.unlock(io);
-
-    switch (arch) {
-        .aarch64, .aarch64_be => {
-            bindings.LLVMInitializeAArch64Target();
-            bindings.LLVMInitializeAArch64TargetInfo();
-            bindings.LLVMInitializeAArch64TargetMC();
-            bindings.LLVMInitializeAArch64AsmPrinter();
-            bindings.LLVMInitializeAArch64AsmParser();
-        },
-        .amdgcn => {
-            bindings.LLVMInitializeAMDGPUTarget();
-            bindings.LLVMInitializeAMDGPUTargetInfo();
-            bindings.LLVMInitializeAMDGPUTargetMC();
-            bindings.LLVMInitializeAMDGPUAsmPrinter();
-            bindings.LLVMInitializeAMDGPUAsmParser();
-        },
-        .thumb, .thumbeb, .arm, .armeb => {
-            bindings.LLVMInitializeARMTarget();
-            bindings.LLVMInitializeARMTargetInfo();
-            bindings.LLVMInitializeARMTargetMC();
-            bindings.LLVMInitializeARMAsmPrinter();
-            bindings.LLVMInitializeARMAsmParser();
-        },
-        .avr => {
-            bindings.LLVMInitializeAVRTarget();
-            bindings.LLVMInitializeAVRTargetInfo();
-            bindings.LLVMInitializeAVRTargetMC();
-            bindings.LLVMInitializeAVRAsmPrinter();
-            bindings.LLVMInitializeAVRAsmParser();
-        },
-        .bpfel, .bpfeb => {
-            bindings.LLVMInitializeBPFTarget();
-            bindings.LLVMInitializeBPFTargetInfo();
-            bindings.LLVMInitializeBPFTargetMC();
-            bindings.LLVMInitializeBPFAsmPrinter();
-            bindings.LLVMInitializeBPFAsmParser();
-        },
-        .hexagon => {
-            bindings.LLVMInitializeHexagonTarget();
-            bindings.LLVMInitializeHexagonTargetInfo();
-            bindings.LLVMInitializeHexagonTargetMC();
-            bindings.LLVMInitializeHexagonAsmPrinter();
-            bindings.LLVMInitializeHexagonAsmParser();
-        },
-        .lanai => {
-            bindings.LLVMInitializeLanaiTarget();
-            bindings.LLVMInitializeLanaiTargetInfo();
-            bindings.LLVMInitializeLanaiTargetMC();
-            bindings.LLVMInitializeLanaiAsmPrinter();
-            bindings.LLVMInitializeLanaiAsmParser();
-        },
-        .mips, .mipsel, .mips64, .mips64el => {
-            bindings.LLVMInitializeMipsTarget();
-            bindings.LLVMInitializeMipsTargetInfo();
-            bindings.LLVMInitializeMipsTargetMC();
-            bindings.LLVMInitializeMipsAsmPrinter();
-            bindings.LLVMInitializeMipsAsmParser();
-        },
-        .msp430 => {
-            bindings.LLVMInitializeMSP430Target();
-            bindings.LLVMInitializeMSP430TargetInfo();
-            bindings.LLVMInitializeMSP430TargetMC();
-            bindings.LLVMInitializeMSP430AsmPrinter();
-            bindings.LLVMInitializeMSP430AsmParser();
-        },
-        .nvptx, .nvptx64 => {
-            bindings.LLVMInitializeNVPTXTarget();
-            bindings.LLVMInitializeNVPTXTargetInfo();
-            bindings.LLVMInitializeNVPTXTargetMC();
-            bindings.LLVMInitializeNVPTXAsmPrinter();
-            // There is no LLVMInitializeNVPTXAsmParser function available.
-        },
-        .powerpc, .powerpcle, .powerpc64, .powerpc64le => {
-            bindings.LLVMInitializePowerPCTarget();
-            bindings.LLVMInitializePowerPCTargetInfo();
-            bindings.LLVMInitializePowerPCTargetMC();
-            bindings.LLVMInitializePowerPCAsmPrinter();
-            bindings.LLVMInitializePowerPCAsmParser();
-        },
-        .riscv32, .riscv32be, .riscv64, .riscv64be => {
-            bindings.LLVMInitializeRISCVTarget();
-            bindings.LLVMInitializeRISCVTargetInfo();
-            bindings.LLVMInitializeRISCVTargetMC();
-            bindings.LLVMInitializeRISCVAsmPrinter();
-            bindings.LLVMInitializeRISCVAsmParser();
-        },
-        .sparc, .sparc64 => {
-            bindings.LLVMInitializeSparcTarget();
-            bindings.LLVMInitializeSparcTargetInfo();
-            bindings.LLVMInitializeSparcTargetMC();
-            bindings.LLVMInitializeSparcAsmPrinter();
-            bindings.LLVMInitializeSparcAsmParser();
-        },
-        .s390x => {
-            bindings.LLVMInitializeSystemZTarget();
-            bindings.LLVMInitializeSystemZTargetInfo();
-            bindings.LLVMInitializeSystemZTargetMC();
-            bindings.LLVMInitializeSystemZAsmPrinter();
-            bindings.LLVMInitializeSystemZAsmParser();
-        },
-        .wasm32, .wasm64 => {
-            bindings.LLVMInitializeWebAssemblyTarget();
-            bindings.LLVMInitializeWebAssemblyTargetInfo();
-            bindings.LLVMInitializeWebAssemblyTargetMC();
-            bindings.LLVMInitializeWebAssemblyAsmPrinter();
-            bindings.LLVMInitializeWebAssemblyAsmParser();
-        },
-        .x86, .x86c16, .x86_64 => {
-            bindings.LLVMInitializeX86Target();
-            bindings.LLVMInitializeX86TargetInfo();
-            bindings.LLVMInitializeX86TargetMC();
-            bindings.LLVMInitializeX86AsmPrinter();
-            bindings.LLVMInitializeX86AsmParser();
-        },
-        .xtensa => {
-            if (build_options.llvm_has_xtensa) {
-                bindings.LLVMInitializeXtensaTarget();
-                bindings.LLVMInitializeXtensaTargetInfo();
-                bindings.LLVMInitializeXtensaTargetMC();
-                bindings.LLVMInitializeXtensaAsmPrinter();
-                bindings.LLVMInitializeXtensaAsmParser();
-            }
-        },
-        .xcore => {
-            bindings.LLVMInitializeXCoreTarget();
-            bindings.LLVMInitializeXCoreTargetInfo();
-            bindings.LLVMInitializeXCoreTargetMC();
-            bindings.LLVMInitializeXCoreAsmPrinter();
-            // There is no LLVMInitializeXCoreAsmParser function.
-        },
-        .m68k => {
-            if (build_options.llvm_has_m68k) {
-                bindings.LLVMInitializeM68kTarget();
-                bindings.LLVMInitializeM68kTargetInfo();
-                bindings.LLVMInitializeM68kTargetMC();
-                bindings.LLVMInitializeM68kAsmPrinter();
-                bindings.LLVMInitializeM68kAsmParser();
-            }
-        },
-        .csky => {
-            if (build_options.llvm_has_csky) {
-                bindings.LLVMInitializeCSKYTarget();
-                bindings.LLVMInitializeCSKYTargetInfo();
-                bindings.LLVMInitializeCSKYTargetMC();
-                // There is no LLVMInitializeCSKYAsmPrinter function.
-                bindings.LLVMInitializeCSKYAsmParser();
-            }
-        },
-        .ve => {
-            bindings.LLVMInitializeVETarget();
-            bindings.LLVMInitializeVETargetInfo();
-            bindings.LLVMInitializeVETargetMC();
-            bindings.LLVMInitializeVEAsmPrinter();
-            bindings.LLVMInitializeVEAsmParser();
-        },
-        .arc => {
-            if (build_options.llvm_has_arc) {
-                bindings.LLVMInitializeARCTarget();
-                bindings.LLVMInitializeARCTargetInfo();
-                bindings.LLVMInitializeARCTargetMC();
-                bindings.LLVMInitializeARCAsmPrinter();
-                // There is no LLVMInitializeARCAsmParser function.
-            }
-        },
-        .loongarch32, .loongarch64 => {
-            bindings.LLVMInitializeLoongArchTarget();
-            bindings.LLVMInitializeLoongArchTargetInfo();
-            bindings.LLVMInitializeLoongArchTargetMC();
-            bindings.LLVMInitializeLoongArchAsmPrinter();
-            bindings.LLVMInitializeLoongArchAsmParser();
-        },
-        .spirv32,
-        .spirv64,
-        => {
-            bindings.LLVMInitializeSPIRVTarget();
-            bindings.LLVMInitializeSPIRVTargetInfo();
-            bindings.LLVMInitializeSPIRVTargetMC();
-            bindings.LLVMInitializeSPIRVAsmPrinter();
-        },
-
-        // LLVM does does not have a backend for these.
-        .alpha,
-        .arceb,
-        .ez80,
-        .hppa,
-        .hppa64,
-        .kvx,
-        .m88k,
-        .microblaze,
-        .microblazeel,
-        .or1k,
-        .propeller,
-        .sh,
-        .sheb,
-        .spork8,
-        .x86_16,
-        .xtensaeb,
-        .z80,
-        => unreachable,
-    }
-}

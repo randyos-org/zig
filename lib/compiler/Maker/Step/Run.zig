@@ -56,6 +56,10 @@ pub fn make(
     defer man.deinit();
 
     var tmp_dir_path: ["tmp".len + Dir.path.sep_str.len + std.fmt.hex(@as(u64, 0)).len]u8 = undefined;
+    var delete_tmp_dir = false;
+    const tmp_path: Path = .{ .root_dir = cache_root, .sub_path = &tmp_dir_path };
+    defer if (delete_tmp_dir) tmp_path.root_dir.handle.deleteTree(io, tmp_path.sub_path) catch |err|
+        std.log.warn("failed to remove tree {qf}: {t}", .{ tmp_path, err });
 
     const has_side_effects = has_side_effects: {
         if (conf_run.environ_map.value) |environ_map_index| {
@@ -582,7 +586,7 @@ pub fn make(
             const digest = missDigest(&man, has_side_effects);
             const output_dir_path = "o" ++ Dir.path.sep_str ++ &digest;
             try populateGeneratedStdIo(maker, &conf_run, &digest);
-            try populateGeneratedPathsCreateDirs(arena, run_index, maker, output_dir_path, output_placeholders.items, switch (conf_run.flags.stdio) {
+            try populateGeneratedPathsCreateDirs(arena, run_index, maker, output_dir_path, null, output_placeholders.items, switch (conf_run.flags.stdio) {
                 .infer_from_args, .inherit, .check, .zig_test => .{ .argv = argv_list.items },
                 .protocol => .{ .protocol = .{
                     .owned_dirs = &owned_dirs,
@@ -612,7 +616,7 @@ pub fn make(
         io.random(@ptrCast(&rand_int));
         tmp_dir_path = ("tmp" ++ Dir.path.sep_str ++ std.fmt.hex(rand_int)).*;
 
-        try populateGeneratedPathsCreateDirs(arena, run_index, maker, &tmp_dir_path, output_placeholders.items, switch (conf_run.flags.stdio) {
+        try populateGeneratedPathsCreateDirs(arena, run_index, maker, &tmp_dir_path, &delete_tmp_dir, output_placeholders.items, switch (conf_run.flags.stdio) {
             .infer_from_args, .inherit, .check, .zig_test => .{ .argv = argv_list.items },
             .protocol => .{ .protocol = .{
                 .owned_dirs = &owned_dirs,
@@ -692,7 +696,6 @@ pub fn make(
 
     if (any_output) {
         // Rename into place.
-        const tmp_path: Path = .{ .root_dir = cache_root, .sub_path = &tmp_dir_path };
         const dst_path: Path = .{ .root_dir = cache_root, .sub_path = "o" ++ Dir.path.sep_str ++ &digest };
         Dir.rename(
             tmp_path.root_dir.handle,
@@ -719,6 +722,11 @@ pub fn make(
                 tmp_path, dst_path, err,
             }),
         };
+        delete_tmp_dir = false;
+    } else {
+        delete_tmp_dir = false;
+        tmp_path.root_dir.handle.deleteTree(io, tmp_path.sub_path) catch |err|
+            return step.fail(maker, "failed to remove tree {qf}: {t}", .{ tmp_path, err });
     }
 
     if (has_side_effects) {
@@ -811,6 +819,9 @@ fn waitZigTest(
     const gpa = maker.gpa;
     const io = graph.io;
     const step = maker.stepByIndex(run_index);
+    const conf = &maker.scanned_config.configuration;
+    const conf_step = run_index.ptr(conf);
+    const conf_run = conf_step.extended.get(conf.extra).run;
 
     const stdout = multi_reader.reader(0);
     const stderr = multi_reader.reader(1);
@@ -843,15 +854,19 @@ fn waitZigTest(
 
     var last_update: Io.Clock.Timestamp = .now(io, .awake);
 
+    const test_timeout_ns = if (maker.unit_test_timeout_ns) |global_test_timeout_ns|
+        global_test_timeout_ns * (conf_run.protocol_test_timeout_scale.value orelse 1)
+    else
+        null;
     // This timeout is used when we're waiting on the test runner itself rather than a user-specified
     // test. For instance, if the test runner leaves this much time between us requesting a test to
     // start and it acknowledging the test starting, we terminate the child and raise an error. This
     // *should* never happen, but could in theory be caused by some very unlucky IB in a test.
-    const response_timeout: Io.Clock.Duration = t: {
-        const ns = @max(maker.unit_test_timeout_ns orelse 0, 60 * std.time.ns_per_s);
-        break :t .{ .clock = .awake, .raw = .fromNanoseconds(ns) };
+    const response_timeout: Io.Clock.Duration = .{
+        .clock = .awake,
+        .raw = .fromNanoseconds(@max(test_timeout_ns orelse 0, 60 * std.time.ns_per_s)),
     };
-    const test_timeout: ?Io.Clock.Duration = if (maker.unit_test_timeout_ns) |ns| .{
+    const test_timeout: ?Io.Clock.Duration = if (test_timeout_ns) |ns| .{
         .clock = .awake,
         .raw = .fromNanoseconds(ns),
     } else null;
@@ -1017,7 +1032,7 @@ const FuzzTestRunner = struct {
             const header_ptr: *InHeader = @ptrCast(instance.message.items);
             var header = header_ptr.*;
             if (std.builtin.Endian.native != .little) {
-                std.mem.byteSwapAllFields(InHeader, &header);
+                std.mem.byteSwap(InHeader, &header);
             }
             return header;
         }
@@ -1151,7 +1166,7 @@ const FuzzTestRunner = struct {
                 return step.fail(
                     maker,
                     "unable to write stdin ({t}); test process unexpectedly {f}",
-                    .{ write_err, fmtTerm(term) },
+                    .{ write_err, term },
                 );
             };
 
@@ -1359,10 +1374,10 @@ const FuzzTestRunner = struct {
         instance.child.stdin.?.close(io);
         instance.child.stdin = null;
         const term = try instance.child.wait(io);
-        if (!termMatches(.{ .exited = 0 }, term)) {
+        if (!term.eql(.{ .exited = 0 })) {
             step.takeResultStderr(gpa, try f.mergedStderr(gpa));
             try f.saveCrash(id, term);
-            return step.fail(maker, "test process unexpectedly {f}", .{fmtTerm(term)});
+            return step.fail(maker, "test process unexpectedly {f}", .{term});
         }
     }
 
@@ -1454,7 +1469,7 @@ const FuzzTestRunner = struct {
 
         return step.fail(maker, "test '{s}' {f}; input saved to '{f}{s}'", .{
             run.fuzz_tests.items[header.test_i],
-            fmtTerm(term),
+            term,
             cache_root,
             crash_name,
         });
@@ -1474,7 +1489,7 @@ const FuzzTestRunner = struct {
             .bytes_len = @intCast(bytes.len),
         };
         if (std.builtin.Endian.native != .little) {
-            std.mem.byteSwapAllFields(OutHeader, &out_header);
+            std.mem.byteSwap(OutHeader, &out_header);
         }
         try f.broadcast.ensureTotalCapacity(gpa, @sizeOf(OutHeader) + bytes.len);
         f.broadcast.appendSliceAssumeCapacity(@ptrCast(&out_header));
@@ -1637,7 +1652,7 @@ fn evalZigTest(
                 // The individual unit test results are irrelevant: the test runner itself broke!
                 // Fail immediately without populating `s.test_results`.
                 return step.fail(maker, "unable to write stdin ({t}); test process unexpectedly {f}", .{
-                    err, fmtTerm(term),
+                    err, term,
                 });
             },
             .no_poll => |no_poll| {
@@ -1665,7 +1680,7 @@ fn evalZigTest(
                     test_results.crash_count += 1;
                     try step.addError(maker, "'{s}' {f}{s}{s}", .{
                         test_metadata.?.testName(test_index),
-                        fmtTerm(term),
+                        term,
                         if (stderr_owned.len != 0) " with stderr:\n" else "",
                         std.mem.trim(u8, stderr_owned, "\n"),
                     });
@@ -1677,10 +1692,10 @@ fn evalZigTest(
                 keep_stderr_owned = true;
 
                 const tests_done = test_metadata != null and test_metadata.?.next_index == std.math.maxInt(u32);
-                if (!tests_done or !termMatches(.{ .exited = 0 }, term)) {
+                if (!tests_done or !term.eql(.{ .exited = 0 })) {
                     // The individual unit test results are irrelevant: the test runner itself broke!
                     // Fail immediately without populating `s.test_results`.
-                    return step.fail(maker, "test process unexpectedly {f}", .{fmtTerm(term)});
+                    return step.fail(maker, "test process unexpectedly {f}", .{term});
                 }
 
                 // We're done with all of the tests! Commit the test results and return.
@@ -2052,6 +2067,7 @@ fn populateGeneratedPathsCreateDirs(
     run_index: Configuration.Step.Index,
     maker: *Maker,
     output_dir_path: []const u8,
+    output_dir_created: ?*bool,
     output_placeholders: []const IndexedOutput,
     populate: union(enum) {
         argv: [][]const u8,
@@ -2089,6 +2105,7 @@ fn populateGeneratedPathsCreateDirs(
         };
         create_path.root_dir.handle.createDirPath(io, create_path.sub_path) catch |err|
             return step.fail(maker, "unable to make path {qf}: {t}", .{ create_path, err });
+        if (output_dir_created) |dir_created| dir_created.* = true;
 
         switch (populate) {
             .argv => |argv| {
@@ -2149,20 +2166,6 @@ fn populateGeneratedStdIo(
             "o", digest, captured.basename.slice(conf),
         });
     }
-}
-
-fn formatTerm(term: ?process.Child.Term, w: *std.Io.Writer) std.Io.Writer.Error!void {
-    if (term) |t| switch (t) {
-        .exited => |code| try w.print("exited with code {d}", .{code}),
-        .signal => |sig| try w.print("terminated with signal {t}", .{sig}),
-        .stopped => |sig| try w.print("stopped with signal {t}", .{sig}),
-        .unknown => |code| try w.print("terminated for unknown reason with code {d}", .{code}),
-    } else {
-        try w.writeAll("exited with any code");
-    }
-}
-fn fmtTerm(term: ?process.Child.Term) std.fmt.Alt(?process.Child.Term, formatTerm) {
-    return .{ .data = term };
 }
 
 const FuzzContext = struct {
@@ -2537,10 +2540,9 @@ fn runCommand(
                     .stopped => .{ .stopped = @fromBackingInt(@intCast(expected_term_value)) },
                     .unknown => .{ .unknown = expected_term_value },
                 };
-                if (!termMatches(expected_term, generic_result.term)) {
-                    return step.fail(maker, "process {f} (expected {f})", .{
-                        fmtTerm(generic_result.term),
-                        fmtTerm(expected_term),
+                if (!generic_result.term.eql(expected_term)) {
+                    return step.fail(maker, "process {f}, expected to have {f}", .{
+                        generic_result.term, expected_term,
                     });
                 }
             }
@@ -2608,7 +2610,7 @@ fn runCommand(
         },
         else => {
             // On failure, report captured stderr like normal standard error output.
-            if (!generic_result.term.success()) {
+            if (!generic_result.term.eql(.success)) {
                 if (generic_result.stderr) |bytes| {
                     try step.setResultStderr(gpa, bytes);
                 }
@@ -2799,30 +2801,6 @@ fn spawnChildAndCollect(
             return null;
         },
     }
-}
-
-fn termMatches(expected: ?process.Child.Term, actual: process.Child.Term) bool {
-    return if (expected) |e| switch (e) {
-        .exited => |expected_code| switch (actual) {
-            .exited => |actual_code| expected_code == actual_code,
-            else => false,
-        },
-        .signal => |expected_sig| switch (actual) {
-            .signal => |actual_sig| expected_sig == actual_sig,
-            else => false,
-        },
-        .stopped => |expected_sig| switch (actual) {
-            .stopped => |actual_sig| expected_sig == actual_sig,
-            else => false,
-        },
-        .unknown => |expected_code| switch (actual) {
-            .unknown => |actual_code| expected_code == actual_code,
-            else => false,
-        },
-    } else switch (actual) {
-        .exited => true,
-        else => false,
-    };
 }
 
 fn setColorEnvironmentVariables(

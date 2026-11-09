@@ -3,7 +3,6 @@
 lower: Lower,
 bin_file: *link.File,
 pt: Zcu.PerThread,
-pic: bool,
 atom_id: link.File.AtomId,
 debug_output: link.File.DebugInfoOutput,
 w: *std.Io.Writer,
@@ -179,7 +178,7 @@ pub fn emitMir(emit: *Emit) Error!void {
                         else => {},
                     }
                     if (emit.bin_file.cast(.elf) != null or emit.bin_file.cast(.elf2) != null) {
-                        if (!emit.pic) switch (lowered_inst.encoding.mnemonic) {
+                        if (!comp.config.pic) switch (lowered_inst.encoding.mnemonic) {
                             .lea => try emit.encodeInst(try .new(.none, .mov, &.{
                                 lowered_inst.ops[0],
                                 .{ .imm = .s(0) },
@@ -287,7 +286,7 @@ pub fn emitMir(emit: *Emit) Error!void {
                 .tlv => |target| {
                     if (emit.bin_file.cast(.elf) != null or emit.bin_file.cast(.elf2) != null) {
                         // TODO handle extern TLS vars, i.e., emit GD model
-                        if (emit.pic) switch (lowered_inst.encoding.mnemonic) {
+                        if (comp.config.pic) switch (lowered_inst.encoding.mnemonic) {
                             .lea, .mov => {
                                 // Here, we currently assume local dynamic TLS vars, and so
                                 // we emit LD model.
@@ -514,7 +513,10 @@ pub fn emitMir(emit: *Emit) Error!void {
                         log.debug("mirDbgEnterInline (line={d}, col={d})", .{
                             emit.prev_di_loc.line, emit.prev_di_loc.column,
                         });
-                        try dwarf.enterInlineFunc(mir_inst.data.ip_index, emit.w.end, emit.prev_di_loc.line, emit.prev_di_loc.column);
+                        if (try dwarf.enterInlineFunc(mir_inst.data.ip_index, emit.w.end, emit.prev_di_loc.line, emit.prev_di_loc.column)) {
+                            emit.prev_di_loc.line = 0;
+                            emit.prev_di_loc.column = 0;
+                        }
                     },
                     .eh_frame, .none => {},
                 },
@@ -523,7 +525,10 @@ pub fn emitMir(emit: *Emit) Error!void {
                         log.debug("mirDbgLeaveInline (line={d}, col={d})", .{
                             emit.prev_di_loc.line, emit.prev_di_loc.column,
                         });
-                        try dwarf.leaveInlineFunc(mir_inst.data.ip_index, emit.w.end);
+                        if (try dwarf.leaveInlineFunc(mir_inst.data.ip_index, emit.w.end)) {
+                            emit.prev_di_loc.line = 0;
+                            emit.prev_di_loc.column = 0;
+                        }
                     },
                     .eh_frame, .none => {},
                 },
@@ -601,8 +606,7 @@ pub fn emitMir(emit: *Emit) Error!void {
                                                 try emit.bin_file.uavSymbol(
                                                     emit.pt,
                                                     uav.val,
-                                                    Type.fromInterned(uav.orig_ty)
-                                                        .ptrAlignment(emit.pt.zcu),
+                                                    Type.fromInterned(uav.orig_ty).ptrAlignment(emit.pt.zcu),
                                                 ),
                                             ),
                                             .lazy_sym, .extern_func => unreachable,
@@ -762,6 +766,7 @@ const RelocInfo = struct {
 fn encodeInst(emit: *Emit, lowered_inst: Instruction, reloc_info: []const RelocInfo) Error!void {
     const comp = emit.bin_file.comp;
     const gpa = comp.gpa;
+    const pic = comp.config.pic;
     const start_offset: u32 = @intCast(emit.w.end);
     lowered_inst.encode(emit.w, .{}) catch |err| switch (err) {
         error.WriteFailed => return error.OutOfMemory,
@@ -804,7 +809,7 @@ fn encodeInst(emit: *Emit, lowered_inst: Instruction, reloc_info: []const RelocI
         .symbol => |target| if (emit.bin_file.cast(.elf)) |elf_file| {
             const zo = elf_file.zigObjectPtr().?;
             const atom = zo.symbol(@backingInt(emit.atom_id)).atom(elf_file).?;
-            const r_type: std.elf.R_X86_64 = if (!emit.pic)
+            const r_type: std.elf.R_X86_64 = if (!pic)
                 .@"32S"
             else if (target.is_extern and !target.force_pcrel_direct)
                 .GOTPCREL
@@ -813,7 +818,7 @@ fn encodeInst(emit: *Emit, lowered_inst: Instruction, reloc_info: []const RelocI
             try atom.addReloc(gpa, .{
                 .r_offset = end_offset - 4,
                 .r_info = (@as(u64, @backingInt(target.symbol)) << 32) | @backingInt(r_type),
-                .r_addend = if (emit.pic) reloc.off - 4 else reloc.off,
+                .r_addend = if (pic) reloc.off - 4 else reloc.off,
             }, zo);
         } else if (emit.bin_file.cast(.macho)) |macho_file| {
             const zo = macho_file.getZigObject().?;
@@ -835,9 +840,9 @@ fn encodeInst(emit: *Emit, lowered_inst: Instruction, reloc_info: []const RelocI
             emit.atom_id,
             end_offset - 4,
             target.symbol,
-            if (emit.pic) reloc.off - 4 else reloc.off,
+            if (pic) reloc.off - 4 else reloc.off,
             .{ .X86_64 = rt: {
-                if (!emit.pic) break :rt .@"32S";
+                if (!pic) break :rt .@"32S";
                 if (target.is_extern and !target.force_pcrel_direct) break :rt .GOTPCREL;
                 break :rt .PC32;
             } },
@@ -891,7 +896,7 @@ fn encodeInst(emit: *Emit, lowered_inst: Instruction, reloc_info: []const RelocI
         .tls => |target_symbol| if (emit.bin_file.cast(.elf)) |elf_file| {
             const zo = elf_file.zigObjectPtr().?;
             const atom = zo.symbol(@backingInt(emit.atom_id)).atom(elf_file).?;
-            const r_type: std.elf.R_X86_64 = if (emit.pic) .TLSLD else unreachable;
+            const r_type: std.elf.R_X86_64 = if (pic) .TLSLD else unreachable;
             try atom.addReloc(gpa, .{
                 .r_offset = end_offset - 4,
                 .r_info = (@as(u64, @backingInt(target_symbol)) << 32) | @backingInt(r_type),
@@ -902,14 +907,14 @@ fn encodeInst(emit: *Emit, lowered_inst: Instruction, reloc_info: []const RelocI
             end_offset - 4,
             target_symbol,
             reloc.off - 4,
-            .{ .X86_64 = if (emit.pic) .TLSLD else unreachable },
+            .{ .X86_64 = if (pic) .TLSLD else unreachable },
         ) else return emit.fail("TODO implement {s} reloc for {s}", .{
             @tagName(reloc.target), @tagName(emit.bin_file.tag),
         }),
         .tlv => |target| if (emit.bin_file.cast(.elf)) |elf_file| {
             const zo = elf_file.zigObjectPtr().?;
             const atom = zo.symbol(@backingInt(emit.atom_id)).atom(elf_file).?;
-            const r_type: std.elf.R_X86_64 = if (emit.pic) .DTPOFF32 else .TPOFF32;
+            const r_type: std.elf.R_X86_64 = if (pic) .DTPOFF32 else .TPOFF32;
             try atom.addReloc(gpa, .{
                 .r_offset = end_offset - 4,
                 .r_info = (@as(u64, @backingInt(target.symbol)) << 32) | @backingInt(r_type),
@@ -920,7 +925,7 @@ fn encodeInst(emit: *Emit, lowered_inst: Instruction, reloc_info: []const RelocI
             end_offset - 4,
             target.symbol,
             reloc.off,
-            .{ .X86_64 = if (emit.pic) .DTPOFF32 else .TPOFF32 },
+            .{ .X86_64 = if (pic) .DTPOFF32 else .TPOFF32 },
         ) else if (emit.bin_file.cast(.macho)) |macho_file| {
             const zo = macho_file.getZigObject().?;
             const atom = zo.symbols.items[@backingInt(emit.atom_id)].getAtom(macho_file).?;
