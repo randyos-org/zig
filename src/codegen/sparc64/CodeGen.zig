@@ -44,6 +44,7 @@ pub fn legalizeFeatures(_: *const std.Target) ?*const Air.Legalize.Features {
     return comptime &.initMany(&.{
         .expand_array_splat,
         .expand_array_to_vector,
+        .expand_loop_switch_br,
     });
 }
 
@@ -88,7 +89,8 @@ reused_operands: std.bit_set.Static(Air.Liveness.bpi - 1) = undefined,
 /// within different branches. Special consideration is needed when a branch
 /// joins with its parent, to make sure all instructions have the same MCValue
 /// across each runtime branch upon joining.
-branch_stack: *std.array_list.Managed(Branch),
+/// Uses `gpa` as its allocator
+branch_stack: *std.ArrayList(Branch),
 
 // Key is the block instruction
 blocks: std.AutoHashMapUnmanaged(Air.Inst.Index, BlockData) = .empty,
@@ -275,13 +277,13 @@ pub fn generate(
     const file_scope = zcu.navFileScope(func.owner_nav);
     const target = &file_scope.mod.?.resolved_target.result;
 
-    var branch_stack = std.array_list.Managed(Branch).init(gpa);
+    var branch_stack: std.ArrayList(Branch) = .empty;
     defer {
         assert(branch_stack.items.len == 1);
         branch_stack.items[0].deinit(gpa);
-        branch_stack.deinit();
+        branch_stack.deinit(gpa);
     }
-    try branch_stack.append(.{});
+    try branch_stack.append(gpa, .{});
 
     var function: Self = .{
         .gpa = gpa,
@@ -644,7 +646,7 @@ fn genBody(self: *Self, body: []const Air.Inst.Index) InnerError!void {
             .field_parent_ptr => @panic("TODO try self.airFieldParentPtr(inst)"),
 
             .switch_br       => try self.airSwitch(inst),
-            .loop_switch_br  => return self.fail("TODO implement `loop_switch_br`", .{}),
+            .loop_switch_br  => unreachable, // legalize .expand_loop_switch_br
             .slice_ptr       => try self.airSlicePtr(inst),
             .slice_len       => try self.airSliceLen(inst),
 
@@ -1469,7 +1471,7 @@ fn airCondBr(self: *Self, inst: Air.Inst.Index) !void {
     const parent_registers = self.register_manager.registers;
     const parent_condition_flags_inst = self.condition_flags_inst;
 
-    try self.branch_stack.append(.{});
+    try self.branch_stack.append(self.gpa, .{});
     errdefer {
         _ = self.branch_stack.pop().?;
     }

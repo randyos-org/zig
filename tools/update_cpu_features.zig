@@ -7516,7 +7516,7 @@ const targets = [_]ArchTarget{
                 .omit = true,
             },
             .{
-                .llvm_name = "goldmont-plus",
+                .llvm_name = "goldmont_plus",
                 .omit = true,
             },
             .{
@@ -7568,15 +7568,15 @@ const targets = [_]ArchTarget{
                 .omit = true,
             },
             .{
-                .llvm_name = "skylake-avx512",
+                .llvm_name = "skylake_avx512",
                 .omit = true,
             },
             .{
-                .llvm_name = "icelake-client",
+                .llvm_name = "icelake_client",
                 .omit = true,
             },
             .{
-                .llvm_name = "icelake-server",
+                .llvm_name = "icelake_server",
                 .omit = true,
             },
             .{
@@ -7680,7 +7680,7 @@ const targets = [_]ArchTarget{
                 .extra_deps = &.{ "smap", "smep" },
             },
             .{
-                .llvm_name = "goldmont_plus",
+                .llvm_name = "goldmont-plus",
                 .extra_deps = &.{ "smap", "smep" },
             },
             .{
@@ -7704,11 +7704,11 @@ const targets = [_]ArchTarget{
                 .extra_deps = &.{"486"},
             },
             .{
-                .llvm_name = "icelake_client",
+                .llvm_name = "icelake-client",
                 .extra_deps = &.{ "smap", "smep" },
             },
             .{
-                .llvm_name = "icelake_server",
+                .llvm_name = "icelake-server",
                 .extra_deps = &.{ "smap", "smep" },
             },
             .{
@@ -7820,7 +7820,7 @@ const targets = [_]ArchTarget{
                 .extra_deps = &.{ "smap", "smep" },
             },
             .{
-                .llvm_name = "skylake_avx512",
+                .llvm_name = "skylake-avx512",
                 .extra_deps = &.{ "smap", "smep" },
             },
             .{
@@ -8741,13 +8741,13 @@ fn processOneTargetInner(io: Io, job: Job) !void {
         const child_args = [_][]const u8{
             job.llvm_tblgen_exe,
             "--dump-json",
-            try std.fmt.allocPrint(arena, "{s}/llvm/lib/Target/{s}/{s}.td", .{
+            try arena.print("{s}/llvm/lib/Target/{s}/{s}.td", .{
                 job.llvm_src_root,
                 llvm.name,
                 llvm.td_name,
             }),
-            try std.fmt.allocPrint(arena, "-I={s}/llvm/include", .{job.llvm_src_root}),
-            try std.fmt.allocPrint(arena, "-I={s}/llvm/lib/Target/{s}", .{
+            try arena.print("-I={s}/llvm/include", .{job.llvm_src_root}),
+            try arena.print("-I={s}/llvm/lib/Target/{s}", .{
                 job.llvm_src_root, llvm.name,
             }),
         };
@@ -9006,7 +9006,7 @@ fn processOneTargetInner(io: Io, job: Job) !void {
     var target_dir = try job.zig_src_dir.openDir(io, "lib/std/Target", .{});
     defer target_dir.close(io);
 
-    const zig_code_basename = try std.fmt.allocPrint(arena, "{s}.zig", .{target.zig_name});
+    const zig_code_basename = try arena.print("{s}.zig", .{target.zig_name});
     var zig_code_file = try target_dir.createFile(io, zig_code_basename, .{});
     defer zig_code_file.close(io);
 

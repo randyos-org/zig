@@ -65,9 +65,6 @@ stderr_writer: File.Writer = .{
 },
 stderr_mode: Io.Terminal.Mode = .no_color,
 stderr_writer_initialized: bool = false,
-stderr_mutex: Io.Mutex = .init,
-stderr_mutex_locker: std.Thread.Id = Thread.invalid_id,
-stderr_mutex_lock_count: usize = 0,
 
 argv0: Argv0,
 /// Protected by `mutex`. Determines whether `environ` has been
@@ -91,6 +88,17 @@ const SystemBasicInformation = if (!is_windows) struct {} else struct {
     buffer: windows.SYSTEM.BASIC_INFORMATION = undefined,
     initialized: std.atomic.Value(bool) = .{ .raw = false },
 };
+
+// These are global to allow the shared stderr file to be coordinated across multiple `Io.Threaded`
+// instances. This is a workaround for the fact that it is currently normal for there to be multiple
+// instances of `Io.Threaded`---one in the application proper, and one used by `std.debug`---which
+// means that if the lock is per-instance, then e.g. `std.Progress` output would clobber panic stack
+// traces because they could both hold a lock simultaneously. Ultimately that problem should instead
+// be solved either by somehow making the stderr lock truly global across all `Io` instances, or by
+// removing the separate "debug" `Io` instance in favour of using the application's instance.
+var stderr_mutex: Io.Mutex = .init;
+var stderr_mutex_locker: std.Thread.Id = Thread.invalid_id;
+var stderr_mutex_lock_count: usize = 0;
 
 const Dl = switch (native_os) {
     .windows => struct {
@@ -478,7 +486,7 @@ const Group = struct {
         return @ptrCast(&g.ptr.state);
     }
 
-    const Status = packed struct(usize) {
+    const Status = bitpack struct(usize) {
         num_running: @Int(.unsigned, @bitSizeOf(usize) - 2),
         have_awaiter: bool,
         canceled: bool,
@@ -642,7 +650,7 @@ const Future = struct {
     result_offset: usize,
     alloc_len: usize,
 
-    const Status = packed struct(usize) {
+    const Status = bitpack struct(usize) {
         /// The values of this enum are chosen so that await/cancel can just OR with 0b01 and 0b11
         /// respectively. That *does* clobber `.done`, but that's actually fine, because if the tag
         /// is `.done` then only the awaiter is referencing this `Future` anyway.
@@ -808,7 +816,7 @@ const AwaitableId = enum(@Int(.unsigned, @bitSizeOf(usize) - 3)) {
     null = 0,
     all_ones = std.math.maxInt(@Int(.unsigned, @bitSizeOf(usize) - 3)),
     _,
-    const Split = packed struct(usize) { low: u3, high: AwaitableId };
+    const Split = bitpack struct(usize) { low: u3, high: AwaitableId };
     fn fromGroup(g: *Io.Group) AwaitableId {
         const split: Split = @bitCast(@intFromPtr(g));
         return split.high;
@@ -841,7 +849,7 @@ const Thread = struct {
         break :Handle void;
     };
 
-    const Status = packed struct(usize) {
+    const Status = bitpack struct(usize) {
         /// The specific values of these enum fields are chosen to simplify the implementation of
         /// the transformations we need to apply to this state.
         cancelation: enum(u3) {
@@ -1367,13 +1375,13 @@ const Thread = struct {
     }
 
     /// Like a `*Thread`, but 2 bits smaller than a pointer (because the LSBs are always 0 due to
-    /// alignment) so that those two bits can be used in a `packed struct`.
+    /// alignment) so that those two bits can be used in a `bitpack struct`.
     const PackedPtr = enum(@Int(.unsigned, @bitSizeOf(usize) - 2)) {
         null = 0,
         all_ones = std.math.maxInt(@Int(.unsigned, @bitSizeOf(usize) - 2)),
         _,
 
-        const Split = packed struct(usize) { low: u2, high: PackedPtr };
+        const Split = bitpack struct(usize) { low: u2, high: PackedPtr };
         fn pack(ptr: *Thread) PackedPtr {
             const split: Split = @bitCast(@intFromPtr(ptr));
             assert(split.low == 0);
@@ -14305,12 +14313,12 @@ fn lockStderr(userdata: ?*anyopaque, terminal_mode: ?Io.Terminal.Mode) Io.Cancel
     const t: *Threaded = @ptrCast(@alignCast(userdata));
     const current_thread_id = Thread.currentId();
 
-    if (@atomicLoad(std.Thread.Id, &t.stderr_mutex_locker, .unordered) != current_thread_id) {
-        try mutexLock(&t.stderr_mutex);
-        assert(t.stderr_mutex_lock_count == 0);
-        @atomicStore(std.Thread.Id, &t.stderr_mutex_locker, current_thread_id, .unordered);
+    if (@atomicLoad(std.Thread.Id, &stderr_mutex_locker, .unordered) != current_thread_id) {
+        try mutexLock(&stderr_mutex);
+        assert(stderr_mutex_lock_count == 0);
+        @atomicStore(std.Thread.Id, &stderr_mutex_locker, current_thread_id, .unordered);
     }
-    t.stderr_mutex_lock_count += 1;
+    stderr_mutex_lock_count += 1;
 
     return initLockedStderr(t, terminal_mode);
 }
@@ -14319,12 +14327,12 @@ fn tryLockStderr(userdata: ?*anyopaque, terminal_mode: ?Io.Terminal.Mode) Io.Can
     const t: *Threaded = @ptrCast(@alignCast(userdata));
     const current_thread_id = Thread.currentId();
 
-    if (@atomicLoad(std.Thread.Id, &t.stderr_mutex_locker, .unordered) != current_thread_id) {
-        if (!t.stderr_mutex.tryLock()) return null;
-        assert(t.stderr_mutex_lock_count == 0);
-        @atomicStore(std.Thread.Id, &t.stderr_mutex_locker, current_thread_id, .unordered);
+    if (@atomicLoad(std.Thread.Id, &stderr_mutex_locker, .unordered) != current_thread_id) {
+        if (!stderr_mutex.tryLock()) return null;
+        assert(stderr_mutex_lock_count == 0);
+        @atomicStore(std.Thread.Id, &stderr_mutex_locker, current_thread_id, .unordered);
     }
-    t.stderr_mutex_lock_count += 1;
+    stderr_mutex_lock_count += 1;
 
     return try initLockedStderr(t, terminal_mode);
 }
@@ -14359,10 +14367,10 @@ fn unlockStderr(userdata: ?*anyopaque) void {
     t.stderr_writer.interface.end = 0;
     t.stderr_writer.interface.buffer = &.{};
 
-    t.stderr_mutex_lock_count -= 1;
-    if (t.stderr_mutex_lock_count == 0) {
-        @atomicStore(std.Thread.Id, &t.stderr_mutex_locker, Thread.invalid_id, .unordered);
-        mutexUnlock(&t.stderr_mutex);
+    stderr_mutex_lock_count -= 1;
+    if (stderr_mutex_lock_count == 0) {
+        @atomicStore(std.Thread.Id, &stderr_mutex_locker, Thread.invalid_id, .unordered);
+        mutexUnlock(&stderr_mutex);
     }
 }
 

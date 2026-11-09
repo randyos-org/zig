@@ -1502,9 +1502,9 @@ fn buildOutputType(
                     } else if (mem.eql(u8, arg, "-flegalize-all")) {
                         create_module.opts.legalize_all = true;
                     } else if (mem.eql(u8, arg, "-fPIC")) {
-                        mod_opts.pic = true;
+                        create_module.opts.pic = true;
                     } else if (mem.eql(u8, arg, "-fno-PIC")) {
-                        mod_opts.pic = false;
+                        create_module.opts.pic = false;
                     } else if (mem.eql(u8, arg, "-fPIE")) {
                         create_module.opts.pie = true;
                     } else if (mem.eql(u8, arg, "-fno-PIE")) {
@@ -1958,8 +1958,8 @@ fn buildOutputType(
             var c_out_mode: ?COutMode = null;
             var out_path: ?[]const u8 = null;
             var is_shared_lib = false;
-            var preprocessor_args = std.array_list.Managed([]const u8).init(arena);
-            var linker_args = std.array_list.Managed([]const u8).init(arena);
+            var preprocessor_args: std.ArrayList([]const u8) = .empty;
+            var linker_args: std.ArrayList([]const u8) = .empty;
             var it = ClangArgIterator.init(arena, all_args);
             var emit_llvm = false;
             var needed = false;
@@ -2116,8 +2116,8 @@ fn buildOutputType(
                         // Never mind what we're doing, just pass the args directly. For example --help.
                         return process.exit(try clangMain(arena, all_args));
                     },
-                    .pic => mod_opts.pic = true,
-                    .no_pic => mod_opts.pic = false,
+                    .pic => create_module.opts.pic = true,
+                    .no_pic => create_module.opts.pic = false,
                     .pie => create_module.opts.pie = true,
                     .no_pie => create_module.opts.pie = false,
                     .lto => {
@@ -2205,12 +2205,12 @@ fn buildOutputType(
                                 if (mem.findScalar(u8, preprocessor_arg, '=')) |equals_pos| {
                                     const key = preprocessor_arg[0..equals_pos];
                                     const value = preprocessor_arg[equals_pos + 1 ..];
-                                    try preprocessor_args.append(key);
-                                    try preprocessor_args.append(value);
+                                    try preprocessor_args.append(arena, key);
+                                    try preprocessor_args.append(arena, value);
                                     continue;
                                 }
                             }
-                            try preprocessor_args.append(preprocessor_arg);
+                            try preprocessor_args.append(arena, preprocessor_arg);
                         }
                     },
                     .wl => {
@@ -2242,8 +2242,8 @@ fn buildOutputType(
                                         continue;
                                     }
 
-                                    try linker_args.append(key);
-                                    try linker_args.append(value);
+                                    try linker_args.append(arena, key);
+                                    try linker_args.append(arena, value);
                                     continue;
                                 }
                             }
@@ -2282,7 +2282,7 @@ fn buildOutputType(
                                 lib_search_strategy = .mode_first;
                                 lib_preferred_mode = .dynamic;
                             } else {
-                                try linker_args.append(linker_arg);
+                                try linker_args.append(arena, linker_arg);
                             }
                         }
                     },
@@ -2449,8 +2449,8 @@ fn buildOutputType(
                                     continue;
                                 }
 
-                                try linker_args.append(key);
-                                try linker_args.append(value);
+                                try linker_args.append(arena, key);
+                                try linker_args.append(arena, value);
                                 break :blk;
                             }
                         }
@@ -2489,12 +2489,12 @@ fn buildOutputType(
                             lib_search_strategy = .mode_first;
                             lib_preferred_mode = .dynamic;
                         } else {
-                            try linker_args.append(it.only_arg);
+                            try linker_args.append(arena, it.only_arg);
                         }
                     },
                     .linker_input_z => {
-                        try linker_args.append("-z");
-                        try linker_args.append(it.only_arg);
+                        try linker_args.append(arena, "-z");
+                        try linker_args.append(arena, it.only_arg);
                     },
                     .lib_dir => try create_module.lib_dir_args.append(arena, it.only_arg),
                     .mcpu => target_mcpu = it.only_arg,
@@ -3580,7 +3580,7 @@ fn buildOutputType(
     if (build_options.have_llvm and emit_asm_resolved != .no) {
         // LLVM has no way to set this non-globally.
         const argv = [_][*:0]const u8{ "zig (LLVM option parsing)", "--x86-asm-syntax=intel" };
-        @import("codegen/llvm/bindings.zig").ParseCommandLineOptions(argv.len, &argv);
+        @import("codegen/llvm/lib.zig").bindings.ParseCommandLineOptions(argv.len, &argv);
     }
 
     if (build_options.have_llvm and create_module.resolved_options.use_llvm and target.cpu.arch.isSpirv()) {
@@ -3609,7 +3609,7 @@ fn buildOutputType(
         }
 
         const argv = [_][*:0]const u8{ "zig (LLVM option parsing)", try extensions.toOwnedSliceSentinel(gpa, 0) };
-        @import("codegen/llvm/bindings.zig").ParseCommandLineOptions(argv.len, &argv);
+        @import("codegen/llvm/lib.zig").bindings.ParseCommandLineOptions(argv.len, &argv);
     }
 
     const clang_passthrough_mode = switch (arg_mode) {
@@ -4060,10 +4060,10 @@ fn createModule(
                     try llvm_to_zig_name.put(llvm_name, feature.name);
                 }
 
-                var mcpu_buffer = std.array_list.Managed(u8).init(gpa);
-                defer mcpu_buffer.deinit();
+                var mcpu_buffer: std.ArrayList(u8) = .empty;
+                defer mcpu_buffer.deinit(gpa);
 
-                try mcpu_buffer.appendSlice(cli_mod.target_mcpu orelse "baseline");
+                try mcpu_buffer.appendSlice(gpa, cli_mod.target_mcpu orelse "baseline");
 
                 for (create_module.llvm_m_args.items) |llvm_m_arg| {
                     if (mem.cutPrefix(u8, llvm_m_arg, "mno-")) |llvm_name| {
@@ -4072,16 +4072,16 @@ fn createModule(
                                 cpu_arch, llvm_name,
                             });
                         };
-                        try mcpu_buffer.append('-');
-                        try mcpu_buffer.appendSlice(zig_name);
+                        try mcpu_buffer.append(gpa, '-');
+                        try mcpu_buffer.appendSlice(gpa, zig_name);
                     } else if (mem.cutPrefix(u8, llvm_m_arg, "m")) |llvm_name| {
                         const zig_name = llvm_to_zig_name.get(llvm_name) orelse {
                             fatal("target architecture {t} has no LLVM CPU feature named {q}", .{
                                 cpu_arch, llvm_name,
                             });
                         };
-                        try mcpu_buffer.append('+');
-                        try mcpu_buffer.appendSlice(zig_name);
+                        try mcpu_buffer.append(gpa, '+');
+                        try mcpu_buffer.appendSlice(gpa, zig_name);
                     } else {
                         unreachable;
                     }
@@ -4317,6 +4317,9 @@ fn createModule(
             error.SharedLibrariesRequireDynamicLinking => fatal("using shared libraries requires dynamic linking", .{}),
             error.DynamicLinkingWithLldRequiresSharedLibraries => fatal("dynamic linking with lld requires at least one shared library", .{}),
             error.ExportMemoryAndDynamicIncompatible => fatal("exporting memory is incompatible with dynamic linking", .{}),
+            error.TargetRequiresPic => fatal("unable to create module {q}: the selected target requires position independent code", .{name}),
+            error.PieRequiresPic => fatal("unable to create module {q}: making a Position Independent Executable requires enabling Position Independent Code", .{name}),
+            error.DynamicLinkingRequiresPic => fatal("unable to create module {q}: dynamic linking requires enabling Position Independent Code", .{name}),
             error.DynamicLibraryPrecludesPie => fatal("dynamic libraries cannot be position independent executables", .{}),
             error.TargetRequiresPie => fatal("the specified target requires position independent executables", .{}),
             error.SanitizeThreadRequiresPie => fatal("thread sanitization requires position independent executables", .{}),
@@ -4350,9 +4353,6 @@ fn createModule(
         error.ValgrindUnsupportedOnTarget => fatal("unable to create module {q}: valgrind does not support the selected target CPU architecture", .{name}),
         error.TargetRequiresSingleThreaded => fatal("unable to create module {q}: the selected target does not support multithreading", .{name}),
         error.BackendRequiresSingleThreaded => fatal("unable to create module {q}: the selected machine code backend is limited to single-threaded applications", .{name}),
-        error.TargetRequiresPic => fatal("unable to create module {q}: the selected target requires position independent code", .{name}),
-        error.PieRequiresPic => fatal("unable to create module {q}: making a Position Independent Executable requires enabling Position Independent Code", .{name}),
-        error.DynamicLinkingRequiresPic => fatal("unable to create module {q}: dynamic linking requires enabling Position Independent Code", .{name}),
         error.TargetHasNoRedZone => fatal("unable to create module {q}: the selected target does not have a red zone", .{name}),
         error.StackCheckUnsupportedByTarget => fatal("unable to create module {q}: the selected target does not support stack checking", .{name}),
         error.StackProtectorUnsupportedByTarget => fatal("unable to create module {q}: the selected target does not support stack protection", .{name}),
@@ -4403,13 +4403,16 @@ fn serve(
     try server.serveStringMessage(.zig_version, build_options.version);
 
     try server.serveConfig(.{ .flags = .{
-        .output_mode = comp.config.output_mode,
         .link_mode = comp.config.link_mode,
         .link_libc = comp.config.link_libc,
         .link_libcpp = comp.config.link_libcpp,
         .link_libunwind = comp.config.link_libunwind,
+        .use_llvm = comp.config.use_llvm,
+        .use_lld = comp.config.use_lld,
+        .use_new_linker = comp.config.use_new_linker,
+        .pic = comp.config.pic,
         .pie = comp.config.pie,
-    } });
+    } }, comp.root_name);
 
     var child_pid: ?std.process.Child.Id = null;
 
@@ -4653,23 +4656,24 @@ fn runOrTest(
         }),
     };
 
-    var argv = std.array_list.Managed([]const u8).init(gpa);
-    defer argv.deinit();
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(gpa);
 
     if (test_exec_args.len == 0) {
-        try argv.append(exe_path);
+        try argv.append(gpa, exe_path);
         if (arg_mode == .zig_test) {
             try argv.append(
+                gpa,
                 try arena.print("--seed=0x{x}", .{randInt(io, u32)}),
             );
         }
     } else {
         for (test_exec_args) |arg| {
-            try argv.append(arg orelse exe_path);
+            try argv.append(gpa, arg orelse exe_path);
         }
     }
     if (runtime_args_start) |i| {
-        try argv.appendSlice(all_args[i..]);
+        try argv.appendSlice(gpa, all_args[i..]);
     }
     try environ_map.put("ZIG_EXE", self_exe_path);
 
@@ -4809,33 +4813,33 @@ fn runOrTestHotSwap(
     };
     defer gpa.free(exe_path);
 
-    var argv = std.array_list.Managed([]const u8).init(gpa);
-    defer argv.deinit();
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(gpa);
 
     if (test_exec_args.len == 0) {
         // when testing pass the zig_exe_path to argv
         if (arg_mode == .zig_test)
-            try argv.appendSlice(&[_][]const u8{
+            try argv.appendSlice(gpa, &.{
                 exe_path, self_exe_path_or_argv0,
             })
             // when running just pass the current exe
         else
-            try argv.appendSlice(&[_][]const u8{
+            try argv.appendSlice(gpa, &.{
                 exe_path,
             });
     } else {
         for (test_exec_args) |arg| {
             if (arg) |a| {
-                try argv.append(a);
+                try argv.append(gpa, a);
             } else {
-                try argv.appendSlice(&[_][]const u8{
+                try argv.appendSlice(gpa, &.{
                     exe_path, self_exe_path_or_argv0,
                 });
             }
         }
     }
     if (runtime_args_start) |i| {
-        try argv.appendSlice(all_args[i..]);
+        try argv.appendSlice(gpa, all_args[i..]);
     }
 
     if (!process.can_spawn) {
@@ -5227,7 +5231,7 @@ fn jitCmdInner(
 
         break :t try child.wait(io);
     };
-    if (term.success()) {
+    if (term.eql(.success)) {
         if (options.capture != null) return;
         return cleanExit(io);
     }
@@ -5329,14 +5333,14 @@ pub fn lldMain(
     const argv = try argsCopyZ(arena, args[1..]);
     // "If an error occurs, false will be returned."
     const ok = rc: {
-        const llvm = @import("codegen/llvm/bindings.zig");
+        const libllvm = @import("codegen/llvm/lib.zig");
         const argc = @as(c_int, @intCast(argv.len));
         if (mem.eql(u8, args[1], "ld.lld")) {
-            break :rc llvm.LinkELF(argc, argv.ptr, can_exit_early, false);
+            break :rc libllvm.bindings.LinkELF(argc, argv.ptr, can_exit_early, false);
         } else if (mem.eql(u8, args[1], "lld-link")) {
-            break :rc llvm.LinkCOFF(argc, argv.ptr, can_exit_early, false);
+            break :rc libllvm.bindings.LinkCOFF(argc, argv.ptr, can_exit_early, false);
         } else if (mem.eql(u8, args[1], "wasm-ld")) {
-            break :rc llvm.LinkWasm(argc, argv.ptr, can_exit_early, false);
+            break :rc libllvm.bindings.LinkWasm(argc, argv.ptr, can_exit_early, false);
         } else {
             unreachable;
         }
@@ -5410,11 +5414,11 @@ pub const ClangArgIterator = struct {
             // NOTE: The ArgIteratorResponseFile returns tokens from next() that are slices of an
             // internal buffer. This internal buffer is arena allocated, so it is not cleaned up here.
 
-            var resp_arg_list = std.array_list.Managed([]const u8).init(arena);
-            defer resp_arg_list.deinit();
+            var resp_arg_list: std.ArrayList([]const u8) = .empty;
+            defer resp_arg_list.deinit(arena);
             {
                 while (self.arg_iterator_response_file.next()) |token| {
-                    try resp_arg_list.append(token);
+                    try resp_arg_list.append(arena, token);
                 }
 
                 const args = try arena.create(Args);
@@ -5425,7 +5429,7 @@ pub const ClangArgIterator = struct {
                 };
                 self.root_args = args;
             }
-            const resp_arg_slice = try resp_arg_list.toOwnedSlice();
+            const resp_arg_slice = try resp_arg_list.toOwnedSlice(arena);
             self.next_index = 0;
             self.argv = resp_arg_slice;
 
@@ -6077,7 +6081,7 @@ const ClangSearchSanitizer = struct {
 
     const Group = enum { I, isystem, iwithsysroot, idirafter, iframework, iframeworkwithsysroot, embed_dir };
 
-    const Membership = packed struct {
+    const Membership = bitpack struct {
         I: bool = false,
         isystem: bool = false,
         iwithsysroot: bool = false,

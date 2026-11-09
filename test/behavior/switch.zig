@@ -1448,10 +1448,10 @@ test "single range switch prong capture" {
     try comptime S.doTheTest(2);
 }
 
-test "switch on packed struct" {
+test "switch on bitpack struct" {
     if (builtin.cpu.arch.isSpirv()) return error.SkipZigTest;
 
-    const P = packed struct {
+    const P = bitpack struct {
         a: u1,
         b: u1,
 
@@ -1480,13 +1480,13 @@ test "switch on packed struct" {
     try comptime P.doTheTest(.{ .a = 0, .b = 1 });
 }
 
-test "switch on packed union" {
+test "switch on bitpack union" {
     if (builtin.cpu.arch.isSpirv()) return error.SkipZigTest;
 
-    const P = packed union(u2) {
+    const P = bitpack union(u2) {
         a: u2,
         b: i2,
-        c: packed struct(u2) { x: u1, y: i1 },
+        c: bitpack struct(u2) { x: u1, y: i1 },
 
         fn doTheTest(p: @This()) !void {
             switch (p) {
@@ -1529,20 +1529,20 @@ test "switch on packed union" {
     try comptime P.doTheTest(.{ .a = 1 });
 }
 
-test "switch on nested packed containers" {
+test "switch on nested bitpack containers" {
     if (builtin.cpu.arch.isSpirv()) return error.SkipZigTest;
 
-    const P = packed struct {
+    const P = bitpack struct {
         iu: u17,
         is: i31,
         b: bool,
         e: enum(u5) { a = 5, b = 3, c = 12 },
-        un: packed union {
+        un: bitpack union {
             a: i9,
             b: u9,
-            c: packed struct(u9) { a: i5, b: u4 },
+            c: bitpack struct(u9) { a: i5, b: u4 },
         },
-        p: packed struct(u9) { a: u3, b: u6 },
+        p: bitpack struct(u9) { a: u3, b: u6 },
 
         fn doTheTest(p: @This()) !void {
             switch (p) {
@@ -1720,4 +1720,45 @@ test "switch on expression" {
         }
     }
     try expect(c == 0);
+}
+
+test "dense switch else prong" {
+    const S = struct {
+        const E = enum {
+            e1,
+            e7,
+            e9,
+            e11,
+            e13,
+        };
+
+        const R = struct {
+            odd: bool,
+            slices: [11][]const u32,
+        };
+
+        noinline fn make(e: E, x: []const u32) R {
+            const s0 = x[0..1];
+            const s1 = x[0..1];
+            const s2 = x[0..1];
+            const s3 = x[0..1];
+            const s4 = x[0..1];
+            const s5 = x[0..1];
+            const s6 = x[0..1];
+            const s7 = x[0..1];
+            const s8 = x[0..1];
+            const s9 = x[0..1];
+            const s10 = x[0..1];
+            return .{
+                .odd = switch (e) {
+                    .e7, .e9, .e11, .e13 => true,
+                    else => false,
+                },
+                .slices = .{ s0, s1, s2, s3, s4, s5, s6, s7, s8, s9, s10 },
+            };
+        }
+    };
+
+    const x: [1]u32 = undefined;
+    _ = S.make(.e1, &x);
 }

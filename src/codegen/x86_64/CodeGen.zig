@@ -170,14 +170,14 @@ loop_switches: std.AutoHashMapUnmanaged(Air.Inst.Index, struct {
 next_temp_index: Temp.Index = @fromBackingInt(@intCast(0)),
 temp_type: [Temp.Index.max]Type = undefined,
 
-const MaskInfo = packed struct {
+const MaskInfo = bitpack struct {
     kind: enum(u2) { lsb, msb, zero_extend, sign_extend },
     inverted: bool = false,
     scalar: Memory.Size,
 };
 
 const ArgsInfo = struct {
-    info: packed struct { reg_index: u3, frame_off: i29 },
+    info: bitpack struct { reg_index: u3, frame_off: i29 },
     frame_index: FrameIndex,
 };
 
@@ -1237,7 +1237,7 @@ fn formatWipMir(data: FormatWipMirData, w: *Writer) Writer.Error!void {
             return;
         },
     }).insts) |lowered_inst| {
-        if (!first) try w.writeAll("\ndebug(wip_mir): ");
+        if (!first) try w.writeAll("\ndebug(wip-mir): ");
         try w.print("  | {f}", .{lowered_inst});
         first = false;
     }
@@ -80734,7 +80734,7 @@ fn genBody(cg: *CodeGen, body: []const Air.Inst.Index) InnerError!void {
                         switch (ty.zigTypeTag(zcu)) {
                             else => {},
                             .@"struct", .@"union" => {
-                                assert(ty.containerLayout(zcu) == .@"packed");
+                                assert(ty.containerLayout(zcu) == .@"bitpack");
                                 for (&ops) |*op| op.wrapInt(cg) catch |err| switch (err) {
                                     error.SelectFailed => return cg.fail("failed to select {s} wrap {f} {f}", .{
                                         @tagName(air_tag),
@@ -87888,22 +87888,7 @@ fn genBody(cg: *CodeGen, body: []const Air.Inst.Index) InnerError!void {
                     .dbg_var_ptr => op_ty.childType(zcu),
                     .dbg_var_val, .dbg_arg_inline => op_ty,
                 };
-                var ops = try cg.tempsFromOperands(inst, .{pl_op.operand});
-                var mcv = ops[0].tracking(cg).short;
-                switch (mcv) {
-                    else => {},
-                    .eflags => |cc| switch (cc) {
-                        else => {},
-                        // These values would self destruct. Maybe we make them use their
-                        // turing complete dwarf expression interpreters for once?
-                        .z_and_np, .nz_or_p => {
-                            try cg.spillEflagsIfOccupied();
-                            mcv = ops[0].tracking(cg).short;
-                        },
-                    },
-                }
-
-                try cg.mir_locals.append(cg.gpa, .{
+                const local: Mir.Local = .{
                     .name = switch (air_name) {
                         .none => switch (air_tag) {
                             else => unreachable,
@@ -87912,10 +87897,39 @@ fn genBody(cg: *CodeGen, body: []const Air.Inst.Index) InnerError!void {
                         else => try cg.addString(air_name.toSlice(cg.air)),
                     },
                     .type = local_ty.toIntern(),
-                });
+                };
+                if (pl_op.operand.toInterned()) |known| {
+                    try cg.mir_locals.append(cg.gpa, local);
+                    _ = try cg.addInst(.{
+                        .tag = .pseudo,
+                        .ops = switch (air_tag) {
+                            else => unreachable,
+                            .dbg_var_ptr => unreachable, // unexpected comptime-known local pointer
+                            .dbg_var_val => .pseudo_dbg_var_val,
+                            .dbg_arg_inline => .pseudo_dbg_arg_val,
+                        },
+                        .data = .{ .ip_index = known },
+                    });
+                } else {
+                    var ops = try cg.tempsFromOperands(inst, .{pl_op.operand});
+                    var mcv = ops[0].tracking(cg).short;
+                    switch (mcv) {
+                        else => {},
+                        .eflags => |cc| switch (cc) {
+                            else => {},
+                            // These values would self destruct. Maybe we make them use their
+                            // turing complete dwarf expression interpreters for once?
+                            .z_and_np, .nz_or_p => {
+                                try cg.spillEflagsIfOccupied();
+                                mcv = ops[0].tracking(cg).short;
+                            },
+                        },
+                    }
 
-                try cg.genLocalDebugInfo(air_tag, local_ty, ops[0].tracking(cg).short);
-                try ops[0].die(cg);
+                    try cg.mir_locals.append(cg.gpa, local);
+                    try cg.genLocalDebugInfo(air_tag, local_ty, ops[0].tracking(cg).short);
+                    try ops[0].die(cg);
+                }
             },
             .is_null => {
                 const un_op = air_datas[@backingInt(inst)].un_op;
@@ -103045,7 +103059,7 @@ fn genBody(cg: *CodeGen, body: []const Air.Inst.Index) InnerError!void {
                 const field_ty = ty_pl.ty;
                 const field_off: u31 = switch (agg_ty.containerLayout(zcu)) {
                     .auto, .@"extern" => @intCast(agg_ty.structFieldOffset(struct_field.field_index, zcu)),
-                    .@"packed" => unreachable,
+                    .@"bitpack" => unreachable,
                 };
                 var ops = try cg.tempsFromOperands(inst, .{struct_field.struct_operand});
                 var res = if (!hack_around_sema_opv_bugs or field_ty.hasRuntimeBits(zcu))
@@ -170953,7 +170967,7 @@ fn genBody(cg: *CodeGen, body: []const Air.Inst.Index) InnerError!void {
                                     }
                                 }
                             },
-                            .@"packed" => unreachable,
+                            .@"bitpack" => unreachable,
                         }
                     },
                     .tuple_type => |tuple_type| {
@@ -172502,7 +172516,7 @@ fn genBody(cg: *CodeGen, body: []const Air.Inst.Index) InnerError!void {
             .save_err_return_trace_index => {
                 const ty_pl = air_datas[@backingInt(inst)].ty_pl;
                 const agg_ty = ty_pl.ty;
-                assert(agg_ty.containerLayout(zcu) != .@"packed");
+                assert(agg_ty.containerLayout(zcu) != .@"bitpack");
                 var ert: Temp = .{ .index = err_ret_trace_index };
                 var res = try ert.load(.usize, .{ .disp = @intCast(agg_ty.structFieldOffset(ty_pl.payload, zcu)) }, cg);
                 try ert.die(cg);
@@ -172514,7 +172528,7 @@ fn genBody(cg: *CodeGen, body: []const Air.Inst.Index) InnerError!void {
                 const is_threadlocal = zcu.comp.config.any_non_single_threaded and nav.resolved.?.@"threadlocal";
 
                 if (is_threadlocal) switch (cg.target.ofmt) {
-                    .elf => if (cg.mod.pic) {
+                    .elf => if (zcu.comp.config.pic) {
                         // LD model: `__tls_get_addr` uses the standard ABI
                         try cg.spillEflagsIfOccupied();
                         try cg.spillRegisters(abi.getCallerPreservedRegs(.x86_64_sysv));
@@ -176068,32 +176082,50 @@ fn genCall(cg: *CodeGen, info: union(enum) {
         else => unreachable,
     };
 
+    const CallTarget = union(enum) {
+        nav: InternPool.Nav.Index,
+        reg: Register,
+        extern_func: Mir.NullTerminatedString,
+    };
+    const call_target: CallTarget = target: switch (info) {
+        .air => |callee| {
+            if (callee.toInterned()) |known_callee| known: {
+                const callee_key = ip.indexToKey(known_callee);
+                const nav = switch (switch (callee_key) {
+                    else => callee_key,
+                    .ptr => |ptr| if (ptr.byte_offset == 0) switch (ptr.base_addr) {
+                        .nav => |nav| ip.indexToKey(zcu.navValue(nav).toIntern()),
+                        else => callee_key,
+                    } else callee_key,
+                }) {
+                    .func => |func| func.owner_nav,
+                    .@"extern" => |@"extern"| @"extern".owner_nav,
+                    else => break :known,
+                };
+                break :target .{ .nav = nav };
+            }
+
+            assert(cg.typeOf(callee).zigTypeTag(zcu) == .pointer);
+            const scratch_reg = if (fn_info.is_var_args and fn_info.cc == .x86_64_sysv) scratch: {
+                const param_regs = abi.getCAbiIntParamRegs(fn_info.cc);
+                break :scratch if (call_info.gp_count < param_regs.len)
+                    param_regs[call_info.gp_count]
+                else
+                    .r10;
+            } else abi.getCAbiLinkerScratchReg(fn_info.cc);
+            try cg.genSetReg(scratch_reg, .usize, .{ .air_ref = callee }, opts);
+            break :target .{ .reg = scratch_reg };
+        },
+        .extern_func => |extern_func| .{ .extern_func = try cg.addString(extern_func.sym) },
+    };
+
     if (fn_info.is_var_args and fn_info.cc == .x86_64_sysv)
         try cg.asmRegisterImmediate(.{ ._, .mov }, .al, .u(call_info.fp_count));
 
-    // Due to incremental compilation, how function calls are generated depends
-    // on linking.
-    switch (info) {
-        .air => |callee| if (callee.toInterned()) |func_ip_index| {
-            const func_key = ip.indexToKey(func_ip_index);
-            switch (switch (func_key) {
-                else => func_key,
-                .ptr => |ptr| if (ptr.byte_offset == 0) switch (ptr.base_addr) {
-                    .nav => |nav| ip.indexToKey(zcu.navValue(nav).toIntern()),
-                    else => func_key,
-                } else func_key,
-            }) {
-                else => unreachable,
-                .func => |func| try cg.asmImmediate(.{ ._, .call }, .{ .nav = .{ .index = func.owner_nav } }),
-                .@"extern" => |@"extern"| try cg.asmImmediate(.{ ._, .call }, .{ .nav = .{ .index = @"extern".owner_nav } }),
-            }
-        } else {
-            assert(cg.typeOf(callee).zigTypeTag(zcu) == .pointer);
-            const scratch_reg = abi.getCAbiLinkerScratchReg(fn_info.cc);
-            try cg.genSetReg(scratch_reg, .usize, .{ .air_ref = callee }, opts);
-            try cg.asmRegister(.{ ._, .call }, scratch_reg);
-        },
-        .extern_func => |extern_func| try cg.asmImmediate(.{ ._, .call }, .{ .extern_func = try cg.addString(extern_func.sym) }),
+    switch (call_target) {
+        .nav => |nav| try cg.asmImmediate(.{ ._, .call }, .{ .nav = .{ .index = nav } }),
+        .reg => |reg| try cg.asmRegister(.{ ._, .call }, reg),
+        .extern_func => |extern_func| try cg.asmImmediate(.{ ._, .call }, .{ .extern_func = extern_func }),
     }
     return call_info.return_value.short;
 }
@@ -176483,7 +176515,7 @@ fn lowerSwitchBr(
     const liveness = try cg.liveness.getSwitchBr(allocator, inst, switch_br.cases_len + 1);
     defer allocator.free(liveness.deaths);
 
-    if (!cg.mod.pic and cg.target.ofmt == .elf) table: {
+    if (!zcu.comp.config.pic and cg.target.ofmt == .elf) table: {
         var prong_items: u32 = 0;
         var min: ?Value = null;
         var max: ?Value = null;
@@ -176537,21 +176569,8 @@ fn lowerSwitchBr(
             condition_index,
             .{ .air_ref = Air.internedToRef(min.?.toIntern()) },
         );
-        const else_reloc = if (switch_br.else_body_len > 0) else_reloc: {
-            var cond_temp = try cg.tempInit(unsigned_condition_ty, condition_index);
-            var table_max_temp = try cg.tempFromValue(try cg.pt.intValue(unsigned_condition_ty, table_len - 1));
-            const cc_temp = cond_temp.cmpInts(.gt, &table_max_temp, cg) catch |err| switch (err) {
-                error.SelectFailed => unreachable,
-                else => |e| return e,
-            };
-            try cond_temp.die(cg);
-            try table_max_temp.die(cg);
-            const else_reloc = try cg.asmJccReloc(cc_temp.tracking(cg).short.eflags, undefined);
-            try cc_temp.die(cg);
-            break :else_reloc else_reloc;
-        } else undefined;
         const table_start: u31 = @intCast(cg.mir_table.items.len);
-        {
+        const else_reloc = dispatch: {
             const condition_index_reg = condition_index_reg: {
                 if (condition_index.isRegister()) {
                     const condition_index_reg = condition_index.getReg().?;
@@ -176562,6 +176581,19 @@ fn lowerSwitchBr(
             const condition_index_lock = cg.register_manager.lockReg(condition_index_reg);
             defer if (condition_index_lock) |lock| cg.register_manager.unlockReg(lock);
             try cg.truncateRegister(unsigned_condition_ty, condition_index_reg);
+            const else_reloc = if (switch_br.else_body_len > 0) else_reloc: {
+                var cond_temp = try cg.tempInit(unsigned_condition_ty, condition_index);
+                var table_max_temp = try cg.tempFromValue(try cg.pt.intValue(unsigned_condition_ty, table_len - 1));
+                const cc_temp = cond_temp.cmpInts(.gt, &table_max_temp, cg) catch |err| switch (err) {
+                    error.SelectFailed => unreachable,
+                    else => |e| return e,
+                };
+                try cond_temp.die(cg);
+                try table_max_temp.die(cg);
+                const reloc = try cg.asmJccReloc(cc_temp.tracking(cg).short.eflags, undefined);
+                try cc_temp.die(cg);
+                break :else_reloc reloc;
+            } else undefined;
             const ptr_size = @divExact(cg.target.ptrBitWidth(), 8);
             try cg.asmMemory(.{ ._mp, .j }, .{
                 .base = .table,
@@ -176572,7 +176604,8 @@ fn lowerSwitchBr(
                     .disp = table_start * ptr_size,
                 } },
             });
-        }
+            break :dispatch else_reloc;
+        };
         const else_reloc_marker: u32 = 0;
         assert(cg.mir_instructions.len > else_reloc_marker);
         try cg.mir_table.appendNTimes(cg.gpa, else_reloc_marker, table_len);
@@ -177835,7 +177868,11 @@ const MoveStrategy = union(enum) {
                     .lea => if (dst_reg.size().bitSize(cg.target) >= 32) dst_reg else dst_reg.to32(),
                 }, src_mem);
             },
-            .load_store_x87 => if (dst_reg != .st0 and cg.register_manager.isKnownRegFree(.st7)) {
+            .load_store_x87 => if (dst_reg == .st0) {
+                try cg.asmRegister(.{ .f_, .free }, .st0);
+                try cg.asmOpOnly(.{ .f_cstp, .in });
+                try cg.asmMemory(.{ .f_, .ld }, src_mem);
+            } else if (cg.register_manager.isKnownRegFree(.st7)) {
                 try cg.asmMemory(.{ .f_, .ld }, src_mem);
                 switch (dst_reg) {
                     .st1, .st2, .st3, .st4, .st5, .st6 => try cg.asmRegister(.{ .f_p, .st }, @fromBackingInt(@intCast(@backingInt(dst_reg) + 1))),
@@ -177845,11 +177882,7 @@ const MoveStrategy = union(enum) {
             } else {
                 try cg.asmRegister(.{ .f_p, .st }, dst_reg);
                 try cg.asmMemory(.{ .f_, .ld }, src_mem);
-                switch (dst_reg) {
-                    .st0 => {},
-                    .st1, .st2, .st3, .st4, .st5, .st6, .st7 => try cg.asmRegister(.{ .f_, .xch }, dst_reg),
-                    else => unreachable,
-                }
+                try cg.asmRegister(.{ .f_, .xch }, dst_reg);
             },
             .insert_extract, .insert_or_extract_through_gpr => |ie| {
                 try cg.asmRegisterRegister(.{ .p_, .xor }, dst_reg, dst_reg);
@@ -178581,7 +178614,8 @@ fn genSetReg(
                     .st0 => try cg.asmRegister(.{ .f_, .st }, dst_reg),
                     .st1, .st2, .st3, .st4, .st5, .st6 => switch (dst_reg) {
                         .st0 => {
-                            try cg.asmRegister(.{ .f_p, .st }, .st0);
+                            try cg.asmRegister(.{ .f_, .free }, .st0);
+                            try cg.asmOpOnly(.{ .f_cstp, .in });
                             try cg.asmRegister(.{ .f_, .ld }, @fromBackingInt(@intCast(@backingInt(src_reg) - 1)));
                         },
                         .st2, .st3, .st4, .st5, .st6 => if (cg.register_manager.isKnownRegFree(.st7)) {
@@ -179525,7 +179559,7 @@ fn airBitCast(self: *CodeGen, inst: Air.Inst.Index) !void {
 
         switch (dst_ty.zigTypeTag(zcu)) {
             .float, .error_union, .error_set, .vector => break :result dst_mcv,
-            .@"struct", .@"union" => if (dst_ty.containerLayout(zcu) != .@"packed") break :result dst_mcv,
+            .@"struct", .@"union" => if (dst_ty.containerLayout(zcu) != .@"bitpack") break :result dst_mcv,
             .optional, .pointer => if (!dst_ty.isPtrAtRuntime(zcu)) break :result dst_mcv,
             else => {},
         }
@@ -181912,14 +181946,14 @@ fn intInfo(cg: *CodeGen, ty: Type) ?std.lang.Type.Int {
             const loaded_struct = ip.loadStructType(ty_index);
             switch (loaded_struct.layout) {
                 .auto, .@"extern" => return null,
-                .@"packed" => ty_index = loaded_struct.packed_backing_int_type,
+                .@"bitpack" => ty_index = loaded_struct.bitpack_backing_int_type,
             }
         },
         .union_type => {
             const loaded_union = ip.loadUnionType(ty_index);
             switch (loaded_union.layout) {
                 .auto, .@"extern" => return null,
-                .@"packed" => ty_index = loaded_union.packed_backing_int_type,
+                .@"bitpack" => ty_index = loaded_union.bitpack_backing_int_type,
             }
         },
         .enum_type => ty_index = ip.loadEnumType(ty_index).int_tag_type,
@@ -189397,10 +189431,10 @@ const Select = struct {
         src_constraints: [@backingInt(Select.Operand.Ref.none) - @backingInt(Select.Operand.Ref.src0)]Constraint = @splat(.any),
         dst_constraints: [@backingInt(Select.Operand.Ref.src0) - @backingInt(Select.Operand.Ref.dst0)]Constraint = @splat(.any),
         patterns: []const Select.Pattern,
-        call_frame: packed struct(u16) { size: u10 = 0, alignment: InternPool.Alignment } = .{ .size = 0, .alignment = .none },
+        call_frame: bitpack struct(u16) { size: u10 = 0, alignment: InternPool.Alignment } = .{ .size = 0, .alignment = .none },
         extra_temps: [@backingInt(Select.Operand.Ref.dst0) - @backingInt(Select.Operand.Ref.tmp0)]TempSpec = @splat(.unused),
         dst_temps: [@backingInt(Select.Operand.Ref.src0) - @backingInt(Select.Operand.Ref.dst0)]TempSpec.Kind = @splat(.unused),
-        clobbers: packed struct {
+        clobbers: bitpack struct {
             eflags: bool = false,
             caller_preserved: CallConv = .none,
         } = .{},
@@ -190533,11 +190567,11 @@ const Select = struct {
     };
     const Label = enum { @"0:", @"1:", @"2:", @"3:", @"4:", @"_", pseudo };
     const Operand = struct {
-        flags: packed struct(u32) {
+        flags: bitpack struct(u32) {
             tag: Tag,
             adjust: Adjust = .none,
             base: Ref.Sized = .none,
-            index: packed struct(u7) {
+            index: bitpack struct(u7) {
                 ref: Ref,
                 scale: Memory.Scale = .@"1",
             } = .{ .ref = .none },
@@ -190554,7 +190588,7 @@ const Select = struct {
             lea,
             mem,
         };
-        const Adjust = packed struct(u12) {
+        const Adjust = bitpack struct(u12) {
             sign: enum(u1) { neg, pos },
             lhs: enum(u6) {
                 none,
@@ -190701,7 +190735,7 @@ const Select = struct {
             src2,
             none,
 
-            const Sized = packed struct(u9) {
+            const Sized = bitpack struct(u9) {
                 ref: Ref,
                 size: Memory.Size,
 

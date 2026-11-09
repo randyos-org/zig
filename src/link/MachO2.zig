@@ -215,7 +215,7 @@ const Section = enum(u8) {
     /// Matches the layout of `std.macho.section_64.flags`.
     ///
     /// TODO: move to `std.macho` and use as the type of `std.macho.section_64.flags`.
-    const Flags = packed struct(u32) {
+    const Flags = bitpack struct(u32) {
         type: enum(u8) {
             regular = 0x00,
             zerofill = 0x01,
@@ -386,7 +386,7 @@ const Reloc = struct {
     bits: Bits,
     next_with_same_target_sym: Reloc.Index.Optional,
 
-    const Bits = packed struct(u8) {
+    const Bits = bitpack struct(u8) {
         target: Target,
         type: Type,
         result: enum(u2) {
@@ -610,7 +610,7 @@ const Reloc = struct {
                 const cur_page: u53 = @intCast(dest_vaddr >> 12);
                 const target_page: u53 = @intCast(target_val >> 12);
                 const page_off: i53 = @bitCast(target_page -% cur_page);
-                const split: packed struct(i21) { lo: u2, hi: i19 } = @bitCast(
+                const split: bitpack struct(i21) { lo: u2, hi: i19 } = @bitCast(
                     std.math.cast(i21, page_off) orelse return error.RelocationOverflow,
                 );
 
@@ -852,7 +852,7 @@ fn initInner(macho: *MachO) !void {
         .flags = std.macho.MH_DYLDLINK | std.macho.MH_PIE,
     };
     if (macho.targetEndian() != std.lang.Endian.native) {
-        std.mem.byteSwapAllFields(mach_header_64, mach_header);
+        std.mem.byteSwap(mach_header_64, mach_header);
     }
 
     // The "__LINKEDIT" segment is special in that it needs to be at the end of the Mach-O file, so
@@ -1022,7 +1022,7 @@ fn initInner(macho: *MachO) !void {
             .symbols_format = .uncompressed,
         };
         if (macho.targetEndian() != std.lang.Endian.native) {
-            std.mem.byteSwapAllFields(std.macho.dyld_chained_fixups_header, chained_fixups_hdr);
+            std.mem.byteSwap(std.macho.dyld_chained_fixups_header, chained_fixups_hdr);
         }
     }
 
@@ -1074,7 +1074,7 @@ fn initInner(macho: *MachO) !void {
                 .page_count = 0,
             };
             if (macho.targetEndian() != std.lang.Endian.native) {
-                std.mem.byteSwapAllFields(std.macho.dyld_chained_starts_in_segment, starts_hdr);
+                std.mem.byteSwap(std.macho.dyld_chained_starts_in_segment, starts_hdr);
             }
         }
     }
@@ -1260,7 +1260,7 @@ fn addInternalSymbol(macho: *MachO, opts: struct {
         },
     };
     if (macho.targetEndian() != std.lang.Endian.native) {
-        std.mem.byteSwapAllFields(std.macho.nlist_64, sym_index.nlist(macho));
+        std.mem.byteSwap(std.macho.nlist_64, sym_index.nlist(macho));
     }
 
     return sym_index;
@@ -1390,7 +1390,7 @@ fn addGlobalSymbol(macho: *MachO, opts: struct {
         .n_value = 0,
     };
     if (macho.targetEndian() != std.lang.Endian.native) {
-        std.mem.byteSwapAllFields(std.macho.nlist_64, symbol.nlist(macho));
+        std.mem.byteSwap(std.macho.nlist_64, symbol.nlist(macho));
     }
 
     try macho.setGlobalSymbolValue(symbol, .{
@@ -1524,7 +1524,7 @@ fn addSegment(macho: *MachO, opts: struct {
     /// the node must be created with the option `.moved = true`.
     existing_node: ?MappedFile.Node.Index = null,
     /// This matches the layout of `std.macho.segment_command_64.flags`.
-    flags: packed struct(u32) {
+    flags: bitpack struct(u32) {
         _unused0: u4 = 0,
         read_only: bool = false,
         _unused1: u27 = 0,
@@ -1761,7 +1761,7 @@ fn appendLoadCommand(
     const cmd_ptr: *Cmd = @ptrCast(cmd_slice[0..@sizeOf(Cmd)]);
     cmd_ptr.* = cmd;
     if (macho.targetEndian() != std.lang.Endian.native) {
-        std.mem.byteSwapAllFields(Cmd, cmd_ptr);
+        std.mem.byteSwap(Cmd, cmd_ptr);
     }
 
     const lc: LoadCommand = @fromBackingInt(@intCast(macho.lc.offsets.items.len));
@@ -1907,7 +1907,7 @@ fn addSection(macho: *MachO, opts: struct {
         .reserved2 = opts.reserved2,
     };
     if (macho.targetEndian() != std.lang.Endian.native) {
-        std.mem.byteSwapAllFields(section_64, section_cmd);
+        std.mem.byteSwap(section_64, section_cmd);
     }
 
     return section;
@@ -1960,8 +1960,8 @@ fn targetLoad(macho: *const MachO, ptr: anytype) @typeInfo(@TypeOf(ptr)).pointer
         else => @compileError(@typeName(Child)),
         .int => std.mem.toNative(Child, ptr.*, macho.targetEndian()),
         .@"enum" => |@"enum"| @fromBackingInt(macho.targetLoad(@as(*align(alignment) const @"enum".tag_type, @ptrCast(ptr)))),
-        inline .@"struct", .@"union" => |bitpack| @bitCast(
-            macho.targetLoad(@as(*align(alignment) const bitpack.backing_integer.?, @ptrCast(ptr))),
+        inline .@"struct", .@"union" => |@"bitpack"| @bitCast(
+            macho.targetLoad(@as(*align(alignment) const @"bitpack".backing_integer.?, @ptrCast(ptr))),
         ),
     };
 }
@@ -1976,8 +1976,8 @@ fn targetStore(macho: *const MachO, ptr: anytype, val: @typeInfo(@TypeOf(ptr)).p
             @as(*align(alignment) @"enum".tag_type, @ptrCast(ptr)),
             @backingInt(val),
         ),
-        inline .@"struct", .@"union" => |bitpack| macho.targetStore(
-            @as(*align(alignment) bitpack.backing_integer.?, @ptrCast(ptr)),
+        inline .@"struct", .@"union" => |@"bitpack"| macho.targetStore(
+            @as(*align(alignment) @"bitpack".backing_integer.?, @ptrCast(ptr)),
             @bitCast(val),
         ),
     };
@@ -3815,7 +3815,7 @@ fn appendImportEntry(macho: *MachO, old_len: u64, symbol_index: Symbol.Index) Er
         .addend = 0,
     };
     if (macho.targetEndian() != std.lang.Endian.native) {
-        std.mem.byteSwapAllFields(std.macho.dyld_chained_import_addend64, &imports[@intCast(old_len)]);
+        std.mem.byteSwap(std.macho.dyld_chained_import_addend64, &imports[@intCast(old_len)]);
     }
 }
 
@@ -4185,7 +4185,7 @@ fn writeOneFixup(
             next_vaddr.* = dest_vaddr;
         },
         .sect => {
-            const target_val: packed struct(u64) {
+            const target_val: bitpack struct(u64) {
                 low36: u36,
                 mid: u20,
                 high8: u8,

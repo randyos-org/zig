@@ -969,11 +969,11 @@ pub inline fn writeStruct(w: *Writer, value: anytype, endian: std.lang.Endian) E
                     return w.writeAll(@ptrCast((&value)[0..1]));
                 } else {
                     var copy = value;
-                    std.mem.byteSwapAllFields(@TypeOf(value), &copy);
+                    std.mem.byteSwap(@TypeOf(value), &copy);
                     return w.writeAll(@ptrCast((&copy)[0..1]));
                 }
             },
-            .@"packed" => {
+            .@"bitpack" => {
                 return writeInt(w, info.backing_integer.?, @bitCast(value), endian);
             },
         },
@@ -1002,7 +1002,7 @@ pub inline fn writeSliceEndian(
 pub fn writeSliceSwap(w: *Writer, Elem: type, slice: []const Elem) Error!void {
     for (slice) |elem| {
         var tmp = elem;
-        std.mem.byteSwapAllFields(Elem, &tmp);
+        std.mem.byteSwap(Elem, &tmp);
         try w.writeAll(@ptrCast(&tmp));
     }
 }
@@ -1429,7 +1429,7 @@ pub fn printValue(
                 .auto => {
                     return w.writeAll(".{ ... }");
                 },
-                .@"extern", .@"packed" => {
+                .@"extern", .@"bitpack" => {
                     if (info.field_names.len == 0) return w.writeAll(".{}");
                     try w.writeAll(".{ ");
                     inline for (info.field_names, 1..) |field_name, i| {
@@ -1997,7 +1997,7 @@ pub fn writeLeb128(w: *Writer, value: anytype) Error!void {
         return;
     }
 
-    const Byte = packed struct { bits: u7, more: bool };
+    const Byte = bitpack struct { bits: u7, more: bool };
     const Int = std.math.ByteAlignedInt(T);
 
     const max_bytes = @divFloor(info.bits - 1, 7) + 1;

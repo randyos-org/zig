@@ -166,7 +166,7 @@ fn printValue(sc: *const ScannedConfig, s: *Serializer, comptime Field: type, fi
                 }
             },
             .@"struct" => |info| switch (info.layout) {
-                .@"packed" => {
+                .@"bitpack" => {
                     try s.value(field_value, .{});
                 },
                 .@"extern" => {
@@ -231,7 +231,7 @@ pub fn printSteps(sc: *const ScannedConfig, graph: *Graph, w: *Writer) !void {
     for (sc.top_level_steps.keys(), sc.top_level_steps.values()) |name, step_index| {
         const step = step_index.ptr(c);
         const decorated_name = if (step_index == c.default_step)
-            try std.fmt.allocPrint(arena, "{s} (default)", .{name})
+            try arena.print("{s} (default)", .{name})
         else
             name;
         const top_level = step.extended.get(c.extra).top_level;
@@ -275,7 +275,7 @@ pub fn printUsage(sc: *const ScannedConfig, graph: *Graph, w: *Writer) !void {
         for (available_options) |option| {
             const name = option.name.slice(&sc.configuration);
             const description = option.description.slice(&sc.configuration);
-            const help = try std.fmt.allocPrint(arena, "  -D{s}=[{t}]", .{ name, option.type });
+            const help = try arena.print("  -D{s}=[{t}]", .{ name, option.type });
             try w.print("{s:<30} {s}\n", .{ help, description });
             if (option.enum_options.slice(&sc.configuration)) |enum_options| {
                 const padding: [33]u8 = @splat(' ');
@@ -377,7 +377,7 @@ const general_usage =
     \\  --watch                      Continuously rebuild when source files are modified
     \\  --debounce <ms>              Delay before rebuilding after changed file detected
     \\  --webui[=ip]                 Enable the web interface on the given IP address
-    \\  --fuzz[=limit]               Continuously search for unit test failures with an optional 
+    \\  --fuzz[=limit]               Continuously search for unit test failures with an optional
     \\                               limit to the max number of iterations. The argument supports
     \\                               an optional 'K', 'M', or 'G' suffix (e.g. "10K"). Implies
     \\                               "--webui" when no limit is specified.

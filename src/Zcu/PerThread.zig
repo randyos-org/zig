@@ -1065,7 +1065,7 @@ pub fn ensureFilePopulated(pt: Zcu.PerThread, file_index: Zcu.File.Index) (Alloc
         .any_comptime_fields = struct_decl.field_comptime_bits != null,
         .any_field_defaults = struct_decl.field_default_body_lens != null,
         .any_field_aligns = struct_decl.field_align_body_lens != null,
-        .packed_backing_mode = if (struct_decl.backing_int_type_body != null) .explicit else .auto,
+        .bitpack_backing_mode = if (struct_decl.backing_int_type_body != null) .explicit else .auto,
     })) {
         .existing => unreachable, // it would have been set as `zcu.fileRootType` already
         .wip => |wip| wip,
@@ -1182,8 +1182,8 @@ fn analyzeMemoizedState(
     var analysis_arena: std.heap.ArenaAllocator = .init(gpa);
     defer analysis_arena.deinit();
 
-    var comptime_err_ret_trace: std.array_list.Managed(Zcu.LazySrcLoc) = .init(gpa);
-    defer comptime_err_ret_trace.deinit();
+    var comptime_err_ret_trace: std.ArrayList(Zcu.LazySrcLoc) = .empty;
+    defer comptime_err_ret_trace.deinit(gpa);
 
     var sema: Sema = .{
         .pt = pt,
@@ -1298,8 +1298,8 @@ fn analyzeComptimeUnit(pt: Zcu.PerThread, cu_id: InternPool.ComptimeUnit.Id) Zcu
     var analysis_arena: std.heap.ArenaAllocator = .init(gpa);
     defer analysis_arena.deinit();
 
-    var comptime_err_ret_trace: std.array_list.Managed(Zcu.LazySrcLoc) = .init(gpa);
-    defer comptime_err_ret_trace.deinit();
+    var comptime_err_ret_trace: std.ArrayList(Zcu.LazySrcLoc) = .empty;
+    defer comptime_err_ret_trace.deinit(gpa);
 
     var sema: Sema = .{
         .pt = pt,
@@ -1425,8 +1425,8 @@ pub fn ensureTypeLayoutUpToDate(
     var analysis_arena: std.heap.ArenaAllocator = .init(gpa);
     defer analysis_arena.deinit();
 
-    var comptime_err_ret_trace: std.array_list.Managed(Zcu.LazySrcLoc) = .init(gpa);
-    defer comptime_err_ret_trace.deinit();
+    var comptime_err_ret_trace: std.ArrayList(Zcu.LazySrcLoc) = .empty;
+    defer comptime_err_ret_trace.deinit(gpa);
 
     const file = zcu.namespacePtr(ty.getNamespaceIndex(zcu)).fileScope(zcu);
 
@@ -1537,8 +1537,8 @@ pub fn ensureStructDefaultsUpToDate(
     var analysis_arena: std.heap.ArenaAllocator = .init(gpa);
     defer analysis_arena.deinit();
 
-    var comptime_err_ret_trace: std.array_list.Managed(Zcu.LazySrcLoc) = .init(gpa);
-    defer comptime_err_ret_trace.deinit();
+    var comptime_err_ret_trace: std.ArrayList(Zcu.LazySrcLoc) = .empty;
+    defer comptime_err_ret_trace.deinit(gpa);
 
     const file = zcu.namespacePtr(ty.getNamespaceIndex(zcu)).fileScope(zcu);
 
@@ -1705,8 +1705,8 @@ fn analyzeNavVal(
     var analysis_arena: std.heap.ArenaAllocator = .init(gpa);
     defer analysis_arena.deinit();
 
-    var comptime_err_ret_trace: std.array_list.Managed(Zcu.LazySrcLoc) = .init(gpa);
-    defer comptime_err_ret_trace.deinit();
+    var comptime_err_ret_trace: std.ArrayList(Zcu.LazySrcLoc) = .empty;
+    defer comptime_err_ret_trace.deinit(gpa);
 
     var sema: Sema = .{
         .pt = pt,
@@ -2082,8 +2082,8 @@ fn analyzeNavType(
     var analysis_arena: std.heap.ArenaAllocator = .init(gpa);
     defer analysis_arena.deinit();
 
-    var comptime_err_ret_trace: std.array_list.Managed(Zcu.LazySrcLoc) = .init(gpa);
-    defer comptime_err_ret_trace.deinit();
+    var comptime_err_ret_trace: std.ArrayList(Zcu.LazySrcLoc) = .empty;
+    defer comptime_err_ret_trace.deinit(gpa);
 
     var sema: Sema = .{
         .pt = pt,
@@ -3310,8 +3310,8 @@ fn analyzeFuncBodyInner(
     var analysis_arena = std.heap.ArenaAllocator.init(gpa);
     defer analysis_arena.deinit();
 
-    var comptime_err_ret_trace = std.array_list.Managed(Zcu.LazySrcLoc).init(gpa);
-    defer comptime_err_ret_trace.deinit();
+    var comptime_err_ret_trace: std.ArrayList(Zcu.LazySrcLoc) = .empty;
+    defer comptime_err_ret_trace.deinit(gpa);
 
     // In the case of a generic function instance, this is the type of the
     // instance, which has comptime parameters elided. In other words, it is
@@ -3575,25 +3575,6 @@ pub fn getErrorValueFromSlice(pt: Zcu.PerThread, name: []const u8) Allocator.Err
     const gpa = comp.gpa;
     const io = comp.io;
     return pt.getErrorValue(try pt.zcu.intern_pool.getOrPutString(gpa, io, name));
-}
-
-/// Asserts that `slice.len` is *not* undef.
-pub fn sliceToArrayPtr(pt: Zcu.PerThread, slice: InternPool.Key.Slice) Allocator.Error!Value {
-    const zcu = pt.zcu;
-    const slice_info = Type.fromInterned(slice.ty).ptrInfo(zcu);
-    const array_ty = try pt.arrayType(.{
-        .len = Value.fromInterned(slice.len).toUnsignedInt(zcu),
-        .child = slice_info.child,
-        .sentinel = slice_info.sentinel,
-    });
-    const ptr_ty = try pt.ptrType(ptr_info: {
-        var ptr_info = slice_info;
-        ptr_info.flags.size = .one;
-        ptr_info.child = array_ty.toIntern();
-        ptr_info.sentinel = .none;
-        break :ptr_info ptr_info;
-    });
-    return pt.getCoerced(.fromInterned(slice.ptr), ptr_ty);
 }
 
 /// Removes any entry from `Zcu.failed_files` associated with `file`. Acquires `Compilation.mutex` as needed.
@@ -3871,7 +3852,7 @@ pub fn reportRetryableFileError(
 
     file.status = .retryable_failure;
 
-    const msg = try std.fmt.allocPrint(gpa, format, args);
+    const msg = try gpa.print(format, args);
     errdefer gpa.free(msg);
 
     const old_msg: ?[]u8 = old_msg: {
@@ -4240,10 +4221,10 @@ pub fn floatValue(pt: Zcu.PerThread, ty: Type, x: anytype) Allocator.Error!Value
     } }));
 }
 
-/// Create a value whose type is a `packed struct` or `packed union`, from the backing integer value.
+/// Create a value whose type is a `bitpack struct` or `bitpack union`, from the backing integer value.
 pub fn bitpackValue(pt: Zcu.PerThread, ty: Type, backing_int_val: Value) Allocator.Error!Value {
     assert(backing_int_val.typeOf(pt.zcu).toIntern() == ty.backingIntType(pt.zcu).toIntern());
-    return .fromInterned(try pt.intern(.{ .bitpack = .{
+    return .fromInterned(try pt.intern(.{ .@"bitpack" = .{
         .ty = ty.toIntern(),
         .backing_int_val = backing_int_val.toIntern(),
     } }));
@@ -4493,7 +4474,7 @@ pub fn runCodegen(pt: Zcu.PerThread, func_index: InternPool.Index, air: *Air) Ru
             error.OutOfMemory => comp.setAllocFailure(),
             error.AlreadyReported => {},
             error.NoLinkFile => assert(comp.bin_file == null),
-            error.BackendDoesNotProduceMir => switch (target_util.zigBackend(
+            error.BackendDoesNotProduceMir => switch (std.zig.compilerBackend(
                 &zcu.root_mod.resolved_target.result,
                 comp.config.use_llvm,
             )) {

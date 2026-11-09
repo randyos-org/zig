@@ -72,7 +72,7 @@ stage3-debug/bin/zig build install test docs \
   -Denable-superhtml \
   -Dspirv-test-runner="$SPIRV_TEST_EXECUTOR/src/test_runner.zig" \
   -Dspirv-test-executor="$SPIRV_TEST_EXECUTOR_OUT/bin/zig-spirv-test-executor" \
-  -Dlldb="$HOME/deps/lldb-zig/Debug-86a744cac9/bin/lldb" \
+  -Dlldb="$HOME/deps/lldb-zig/Debug-c003e86788/bin/lldb" \
   -Dskip-freebsd \
   -Dskip-netbsd \
   -Dskip-openbsd \

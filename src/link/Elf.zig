@@ -378,7 +378,7 @@ pub fn createEmpty(
             self.zig_object = zig_object;
             zig_object.* = .{
                 .index = index,
-                .basename = try std.fmt.allocPrint(arena, "{s}.o", .{
+                .basename = try arena.print("{s}.o", .{
                     fs.path.stem(zcu.main_mod.root_src_path),
                 }),
             };
@@ -872,9 +872,9 @@ fn flushInner(self: *Elf, arena: Allocator, tid: Zcu.PerThread.Id) !void {
     self.rela_plt.clearRetainingCapacity();
 
     if (self.zigObjectPtr()) |zo| {
-        var undefs: std.array_hash_map.Auto(SymbolResolver.Index, std.array_list.Managed(Ref)) = .empty;
+        var undefs: std.array_hash_map.Auto(SymbolResolver.Index, std.ArrayList(Ref)) = .empty;
         defer {
-            for (undefs.values()) |*refs| refs.deinit();
+            for (undefs.values()) |*refs| refs.deinit(gpa);
             undefs.deinit(gpa);
         }
 
@@ -980,10 +980,10 @@ fn dumpArgvInit(self: *Elf, arena: Allocator) !void {
 
         try argv.appendSlice(gpa, &.{
             "-z",
-            try std.fmt.allocPrint(arena, "stack-size={d}", .{self.base.stack_size}),
+            try arena.print("stack-size={d}", .{self.base.stack_size}),
         });
 
-        try argv.append(gpa, try std.fmt.allocPrint(arena, "--image-base={d}", .{self.image_base}));
+        try argv.append(gpa, try arena.print("--image-base={d}", .{self.image_base}));
 
         if (self.base.gc_sections) {
             try argv.append(gpa, "--gc-sections");
@@ -1305,9 +1305,9 @@ fn scanRelocs(self: *Elf) !void {
     const gpa = self.base.comp.gpa;
     const shared_objects = self.shared_objects.values();
 
-    var undefs: std.array_hash_map.Auto(SymbolResolver.Index, std.array_list.Managed(Ref)) = .empty;
+    var undefs: std.array_hash_map.Auto(SymbolResolver.Index, std.ArrayList(Ref)) = .empty;
     defer {
-        for (undefs.values()) |*refs| refs.deinit();
+        for (undefs.values()) |*refs| refs.deinit(gpa);
         undefs.deinit(gpa);
     }
 
@@ -1447,7 +1447,7 @@ pub fn writeShdrTable(self: *Elf) !void {
                 assert(self.sections.items(.shdr)[i].sh_offset != math.maxInt(u64));
                 shdr.* = shdrTo32(self.sections.items(.shdr)[i]);
                 if (foreign_endian) {
-                    mem.byteSwapAllFields(elf.Elf32_Shdr, shdr);
+                    mem.byteSwap(elf.Elf32_Shdr, shdr);
                 }
             }
             try self.pwriteAll(@ptrCast(buf), self.shdr_table_offset.?);
@@ -1460,7 +1460,7 @@ pub fn writeShdrTable(self: *Elf) !void {
                 assert(self.sections.items(.shdr)[i].sh_offset != math.maxInt(u64));
                 shdr.* = self.sections.items(.shdr)[i];
                 if (foreign_endian) {
-                    mem.byteSwapAllFields(elf.Elf64_Shdr, shdr);
+                    mem.byteSwap(elf.Elf64_Shdr, shdr);
                 }
             }
             try self.pwriteAll(@ptrCast(buf), self.shdr_table_offset.?);
@@ -1487,7 +1487,7 @@ fn writePhdrTable(self: *Elf) !void {
             for (buf, 0..) |*phdr, i| {
                 phdr.* = phdrTo32(self.phdrs.items[i]);
                 if (foreign_endian) {
-                    mem.byteSwapAllFields(elf.Elf32.Phdr, phdr);
+                    mem.byteSwap(elf.Elf32.Phdr, phdr);
                 }
             }
             try self.pwriteAll(@ptrCast(buf), phdr_table.offset);
@@ -1499,7 +1499,7 @@ fn writePhdrTable(self: *Elf) !void {
             for (buf, 0..) |*phdr, i| {
                 phdr.* = self.phdrs.items[i];
                 if (foreign_endian) {
-                    mem.byteSwapAllFields(elf.Elf64.Phdr, phdr);
+                    mem.byteSwap(elf.Elf64.Phdr, phdr);
                 }
             }
             try self.pwriteAll(@ptrCast(buf), phdr_table.offset);
@@ -1794,14 +1794,14 @@ pub fn updateMergeSectionSizes(self: *Elf) !void {
 
 pub fn writeMergeSections(self: *Elf) !void {
     const gpa = self.base.comp.gpa;
-    var buffer = std.array_list.Managed(u8).init(gpa);
-    defer buffer.deinit();
+    var buffer: std.ArrayList(u8) = .empty;
+    defer buffer.deinit(gpa);
 
     for (self.merge_sections.items) |*msec| {
         const shdr = self.sections.items(.shdr)[msec.output_section_index];
         const fileoff = try self.cast(usize, msec.value + shdr.sh_offset);
         const size = try self.cast(usize, msec.size);
-        try buffer.ensureTotalCapacity(size);
+        try buffer.ensureTotalCapacity(gpa, size);
         buffer.appendNTimesAssumeCapacity(0, size);
 
         for (msec.finalized_subsections.items) |msub_index| {
@@ -2168,9 +2168,8 @@ fn sortInitFini(self: *Elf) !void {
         }
         if (!is_init_fini and !is_ctor_dtor) continue;
 
-        var entries = std.array_list.Managed(Entry).init(gpa);
-        try entries.ensureTotalCapacityPrecise(atom_list.atoms.keys().len);
-        defer entries.deinit();
+        var entries: std.ArrayList(Entry) = try .initCapacity(gpa, atom_list.atoms.keys().len);
+        defer entries.deinit(gpa);
 
         for (atom_list.atoms.keys()) |ref| {
             const atom_ptr = self.atom(ref).?;
@@ -2725,21 +2724,21 @@ pub fn allocateAllocSections(self: *Elf) !void {
     // virtual and file offsets. However, the simple one will do for one
     // as we are more interested in quick turnaround and compatibility
     // with `findFreeSpace` mechanics than anything else.
-    const Cover = std.array_list.Managed(u32);
+    const Cover = std.ArrayList(u32);
     const gpa = self.base.comp.gpa;
     var covers: [max_number_of_object_segments]Cover = undefined;
     for (&covers) |*cover| {
-        cover.* = Cover.init(gpa);
+        cover.* = .empty;
     }
     defer for (&covers) |*cover| {
-        cover.deinit();
+        cover.deinit(gpa);
     };
 
     for (slice.items(.shdr), 0..) |shdr, shndx| {
         if (shdr.sh_type == elf.SHT_NULL) continue;
         if (shdr.sh_flags & elf.SHF_ALLOC == 0) continue;
         const flags = shdrToPhdrFlags(shdr.sh_flags);
-        try covers[flags - 1].append(@intCast(shndx));
+        try covers[flags - 1].append(gpa, @intCast(shndx));
     }
 
     // Now we can proceed with allocating the sections in virtual memory.
@@ -2941,9 +2940,9 @@ fn allocateSpecialPhdrs(self: *Elf) void {
 fn writeAtoms(self: *Elf) !void {
     const gpa = self.base.comp.gpa;
 
-    var undefs: std.array_hash_map.Auto(SymbolResolver.Index, std.array_list.Managed(Ref)) = .empty;
+    var undefs: std.array_hash_map.Auto(SymbolResolver.Index, std.ArrayList(Ref)) = .empty;
     defer {
-        for (undefs.values()) |*refs| refs.deinit();
+        for (undefs.values()) |*refs| refs.deinit(gpa);
         undefs.deinit(gpa);
     }
 
@@ -2990,9 +2989,8 @@ pub fn updateSymtabSize(self: *Elf) !void {
     const gpa = self.base.comp.gpa;
     const shared_objects = self.shared_objects.values();
 
-    var files = std.array_list.Managed(File.Index).init(gpa);
-    defer files.deinit();
-    try files.ensureTotalCapacityPrecise(self.objects.items.len + shared_objects.len + 2);
+    var files: std.ArrayList(File.Index) = try .initCapacity(gpa, self.objects.items.len + shared_objects.len + 2);
+    defer files.deinit(gpa);
 
     if (self.zig_object_index) |index| files.appendAssumeCapacity(index);
     for (self.objects.items) |index| files.appendAssumeCapacity(index);
@@ -3308,13 +3306,13 @@ pub fn writeSymtab(self: *Elf) !void {
                     .st_value = @intCast(sym.st_value),
                     .st_size = @intCast(sym.st_size),
                 };
-                if (foreign_endian) mem.byteSwapAllFields(elf.Elf32_Sym, out);
+                if (foreign_endian) mem.byteSwap(elf.Elf32_Sym, out);
             }
             try self.pwriteAll(@ptrCast(buf), symtab_shdr.sh_offset);
         },
         .p64 => {
             if (foreign_endian) {
-                for (self.symtab.items) |*sym| mem.byteSwapAllFields(elf.Elf64_Sym, sym);
+                for (self.symtab.items) |*sym| mem.byteSwap(elf.Elf64_Sym, sym);
             }
             try self.pwriteAll(@ptrCast(self.symtab.items), symtab_shdr.sh_offset);
         },
