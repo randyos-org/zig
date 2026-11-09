@@ -149,6 +149,30 @@ test "@intFromFloat > 128 bits" {
     try testIntFromFloat(f128, -1 << 100, i200, -1 << 100);
 }
 
+test "@intFromFloat f16 to 128 bits" {
+    if (builtin.cpu.arch.isSpirv()) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_riscv64) return error.SkipZigTest;
+
+    try testIntFromFloat(f16, 0, i128, 0);
+    try testIntFromFloat(f16, -0.0, i128, 0);
+    try testIntFromFloat(f16, 1.5, i128, 1);
+    try testIntFromFloat(f16, -1.5, i128, -1);
+    try testIntFromFloat(f16, 0x1p-24, i128, 0);
+    try testIntFromFloat(f16, 65504, i128, 65504);
+    try testIntFromFloat(f16, -65504, i128, -65504);
+    try testIntFromFloat(f16, 0, u128, 0);
+    try testIntFromFloat(f16, 1.5, u128, 1);
+    try testIntFromFloat(f16, 65504, u128, 65504);
+
+    var v: @Vector(4, f16) = .{ 0, 1.5, -65504, 65504 };
+    _ = &v;
+    const w: @Vector(4, i128) = @intFromFloat(v);
+    try expectEqual(@Vector(4, i128){ 0, 1, -65504, 65504 }, w);
+}
+
 fn testFloatFromInt(comptime I: type, i: I, comptime F: type, expected: F) !void {
     try expect(@as(F, @floatFromInt(i)) == expected);
 }

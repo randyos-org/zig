@@ -2133,6 +2133,21 @@ fn airIntFromFloat(
     const dest_scalar_info = dest_scalar_ty.intInfo(zcu);
 
     if (intrinsicsAllowed(.compiler_rt, operand_scalar_ty, target)) {
+        // LLVM 23 asserts (or miscompiles) f16 to integers wider than 64 bits on x86 with
+        // avx512fp16 (llvm/llvm-project#230703, fixed on main by c4e841f8ad22, not in 23.x).
+        // Every finite f16 fits in 64 bits, so convert to 64 bits and then extend, as that
+        // fix does. Remove once the devkit's LLVM has it.
+        if (target.cpu.arch.isX86() and operand_scalar_ty.floatBits(target) == 16 and dest_scalar_info.bits > 64) {
+            const narrow_ty: Builder.Type = if (operand_ty.isVector(zcu))
+                try o.builder.vectorType(.normal, operand_ty.vectorLen(zcu), .i64)
+            else
+                .i64;
+            const narrow = try fg.wip.conv(.unneeded, operand, .fromStdLang(dest_scalar_info.signedness), narrow_ty, "");
+            return fg.wip.cast(switch (dest_scalar_info.signedness) {
+                .signed => .sext,
+                .unsigned => .zext,
+            }, narrow, dest_llvm_ty, "");
+        }
         // TODO set fast math flag
         return fg.wip.conv(.unneeded, operand, .fromStdLang(dest_scalar_info.signedness), dest_llvm_ty, "");
     }
